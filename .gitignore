@@ -1,0 +1,52 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Secrets - NEVER commit
+.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+
+# Testing cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution
+*.tar.gz
+*.zip
+
+# Bob internal
+.bob/
+# Loose audit files
+functionality-audit-report*.html

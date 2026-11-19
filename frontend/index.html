@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Wi-Fi Safety Assistant – IBM AI Hackathon</title>
+<link rel="stylesheet" href="/static/css/style.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+</head>
+<body>
+<!-- ═══════════════════════════════════════ HEADER ════════════════════════ -->
+<header class="header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="shield-icon">🛡️</div>
+      <div>
+        <span class="brand-name">Wi-Fi Safety Assistant</span>
+        <span class="brand-sub">IBM Agentic AI · Bengaluru Commuters</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-btn active" data-panel="dashboard">Dashboard</button>
+      <button class="nav-btn" data-panel="assess">Risk Assessment</button>
+      <button class="nav-btn" data-panel="assistant">AI Assistant</button>
+      <button class="nav-btn" data-panel="history">History</button>
+      <button class="nav-btn" data-panel="analytics">Analytics</button>
+    </nav>
+    <div class="header-status">
+      <div class="status-dot" id="backendStatus" title="Backend status"></div>
+      <span id="backendStatusLabel">Connecting…</span>
+    </div>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════ MAIN ═════════════════════════ -->
+<main class="main">
+
+<!-- ───────── PANEL: DASHBOARD ────────────────────────────────────────── -->
+<section class="panel active" id="panel-dashboard">
+  <div class="page-title">
+    <h1>Public Wi-Fi Safety Dashboard</h1>
+    <p class="subtitle">AI-powered protection for Bengaluru commuters · Powered by IBM Granite, Groq &amp; Gemini</p>
+  </div>
+
+  <!-- Model status row -->
+  <div class="card-row three-col" id="modelStatusRow">
+    <div class="model-card" id="modelGranite">
+      <div class="model-logo ibm-logo">IBM</div>
+      <div class="model-info">
+        <div class="model-name">IBM Granite</div>
+        <div class="model-sub">Primary · watsonx.ai</div>
+      </div>
+      <div class="model-badge checking">Checking…</div>
+    </div>
+    <div class="model-card" id="modelGroq">
+      <div class="model-logo groq-logo">⚡</div>
+      <div class="model-info">
+        <div class="model-name">Groq</div>
+        <div class="model-sub">Secondary · Fast Inference</div>
+      </div>
+      <div class="model-badge checking">Checking…</div>
+    </div>
+    <div class="model-card" id="modelGemini">
+      <div class="model-logo gemini-logo">✦</div>
+      <div class="model-info">
+        <div class="model-name">Google Gemini</div>
+        <div class="model-sub">Secondary · Verification</div>
+      </div>
+      <div class="model-badge checking">Checking…</div>
+    </div>
+  </div>
+
+  <!-- Quick stats -->
+  <div class="card-row four-col" id="quickStats">
+    <div class="stat-card">
+      <div class="stat-value" id="statTotal">—</div>
+      <div class="stat-label">Total Assessments</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value high-color" id="statHigh">—</div>
+      <div class="stat-label">High Risk Detected</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value medium-color" id="statMedium">—</div>
+      <div class="stat-label">Medium Risk</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value low-color" id="statLow">—</div>
+      <div class="stat-label">Low Risk</div>
+    </div>
+  </div>
+
+  <!-- Agent pipeline visualization -->
+  <div class="card">
+    <div class="card-header">
+      <h2>🤖 Three-Agent AI Pipeline</h2>
+      <span class="card-badge">IBM Agentic AI Architecture</span>
+    </div>
+    <div class="agent-pipeline">
+      <div class="pipeline-agent" id="pipeAgent1">
+        <div class="agent-icon">🔍</div>
+        <div class="agent-label">Agent 1</div>
+        <div class="agent-name">Network Risk<br/>Assessment</div>
+        <div class="agent-model">IBM Granite</div>
+        <div class="agent-status idle">Idle</div>
+      </div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-agent" id="pipeAgent2">
+        <div class="agent-icon">🔒</div>
+        <div class="agent-label">Agent 2</div>
+        <div class="agent-name">Device Safety<br/>&amp; Prevention</div>
+        <div class="agent-model">IBM Granite</div>
+        <div class="agent-status idle">Idle</div>
+      </div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-agent" id="pipeAgent3">
+        <div class="agent-icon">🚨</div>
+        <div class="agent-label">Agent 3</div>
+        <div class="agent-name">Incident Response<br/>&amp; Guidance</div>
+        <div class="agent-model">Groq / Gemini</div>
+        <div class="agent-status idle">Idle</div>
+      </div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-agent" id="pipeSupervisor">
+        <div class="agent-icon">🎯</div>
+        <div class="agent-label">Supervisor</div>
+        <div class="agent-name">Orchestrator<br/>&amp; Consolidator</div>
+        <div class="agent-model">Central</div>
+        <div class="agent-status idle">Idle</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick assess CTA -->
+  <div class="card cta-card">
+    <div class="cta-content">
+      <div class="cta-icon">📶</div>
+      <div>
+        <h3>Check Your Current Wi-Fi</h3>
+        <p>Get an instant AI-powered risk assessment for the network you're connected to.</p>
+      </div>
+      <button class="btn-primary" onclick="switchPanel('assess')">Start Assessment →</button>
+    </div>
+  </div>
+
+  <!-- CERT-In & Resources -->
+  <div class="card-row two-col">
+    <div class="card resources-card">
+      <div class="card-header"><h3>🇮🇳 Official Cybersecurity Resources</h3></div>
+      <ul class="resource-list">
+        <li><a href="https://www.cert-in.org.in/" target="_blank">CERT-In – Indian Computer Emergency Response Team</a></li>
+        <li><a href="https://i4c.mha.gov.in/" target="_blank">I4C – Indian Cyber Crime Coordination Centre</a></li>
+        <li><a href="https://cybercrime.gov.in/" target="_blank">National Cyber Crime Reporting Portal</a></li>
+        <li><span class="helpline">🆘 Cyber Crime Helpline: <strong>1930</strong></span></li>
+      </ul>
+    </div>
+    <div class="card tips-card">
+      <div class="card-header"><h3>⚡ Quick Safety Tips</h3></div>
+      <ul class="tips-list">
+        <li>Always use VPN on public Wi-Fi</li>
+        <li>Avoid banking on unknown networks</li>
+        <li>Verify network name with staff</li>
+        <li>Use 4G/5G for sensitive activities</li>
+        <li>Enable 2FA on all accounts</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── PANEL: RISK ASSESSMENT ──────────────────────────────────── -->
+<section class="panel" id="panel-assess">
+  <div class="page-title">
+    <h1>Wi-Fi Risk Assessment</h1>
+    <p class="subtitle">Describe your Wi-Fi connection – our AI agents will assess the risk</p>
+  </div>
+
+  <div class="assess-layout">
+    <!-- Input form -->
+    <div class="card assess-form-card">
+      <div class="card-header"><h2>📋 Connection Details</h2></div>
+      <form id="assessForm">
+        <div class="form-group">
+          <label for="wifiName">Wi-Fi Network Name (SSID) <span class="required">*</span></label>
+          <input type="text" id="wifiName" placeholder="e.g. CafeWifi_Free, NammaMetro_WiFi"
+                 maxlength="100" required/>
+          <div class="field-hint">The name shown when you connect to Wi-Fi</div>
+        </div>
+
+        <div class="form-group">
+          <label for="connectionType">Connection / Security Type</label>
+          <select id="connectionType">
+            <option value="unknown">Don't know / Not visible</option>
+            <option value="open">Open (No password)</option>
+            <option value="wep">WEP (Old, weak)</option>
+            <option value="wpa">WPA</option>
+            <option value="wpa2-personal">WPA2-Personal</option>
+            <option value="wpa2-enterprise">WPA2-Enterprise (Corporate)</option>
+            <option value="wpa3">WPA3</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="location">Location</label>
+          <input type="text" id="location"
+                 placeholder="e.g. Namma Metro MG Road, Bangalore Airport, Café Coffee Day"/>
+          <div class="field-hint">Where are you connecting from?</div>
+        </div>
+
+        <div class="form-group">
+          <label for="userContext">Additional Context</label>
+          <textarea id="userContext" rows="3"
+                    placeholder="Describe anything unusual: asked for login, redirected to unknown page, same name as another network, etc."
+                    maxlength="1000"></textarea>
+          <div class="field-hint">Do NOT enter passwords, OTPs or sensitive information</div>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn-primary btn-large" id="assessBtn">
+            <span id="assessBtnText">🔍 Analyze with AI Agents</span>
+          </button>
+          <button type="button" class="btn-secondary" onclick="clearAssessForm()">Clear</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Results -->
+    <div id="assessResults" class="assess-results hidden">
+      <!-- Risk badge -->
+      <div class="card risk-result-card" id="riskResultCard">
+        <div class="risk-badge-large" id="riskBadgeLarge">—</div>
+        <div class="risk-score-bar">
+          <div class="risk-score-fill" id="riskScoreFill" style="width:0%"></div>
+        </div>
+        <p class="risk-explanation" id="riskExplanation"></p>
+      </div>
+
+      <!-- Warning signs -->
+      <div class="card" id="warningSigns" style="display:none">
+        <div class="card-header"><h3>⚠️ Warning Signs Detected</h3></div>
+        <ul class="warning-list" id="warningSignsList"></ul>
+      </div>
+
+      <!-- Device Checklist -->
+      <div class="card">
+        <div class="card-header">
+          <h3>✅ Device Security Checklist</h3>
+          <span class="card-badge" id="checklistBadge"></span>
+        </div>
+        <div id="deviceChecklist"></div>
+      </div>
+
+      <!-- Banking Guidance -->
+      <div class="card banking-card">
+        <div class="card-header"><h3>🏦 Banking &amp; Financial Activity Guidance</h3></div>
+        <div id="bankingGuidance"></div>
+      </div>
+
+      <!-- Agent Activity Log -->
+      <div class="card">
+        <div class="card-header"><h3>🤖 Agent Execution Log</h3></div>
+        <div id="agentExecutionLog"></div>
+      </div>
+
+      <!-- Final Report -->
+      <div class="card report-card">
+        <div class="card-header">
+          <h3>📄 Final Safety Report</h3>
+          <button class="btn-sm" onclick="downloadReport()">⬇ Download</button>
+        </div>
+        <div id="finalReport"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── PANEL: AI ASSISTANT ─────────────────────────────────────── -->
+<section class="panel" id="panel-assistant">
+  <div class="page-title">
+    <h1>AI Safety Assistant</h1>
+    <p class="subtitle">Ask anything about Wi-Fi security, cyber threats, or staying safe online</p>
+  </div>
+
+  <div class="chat-layout">
+    <div class="card chat-card">
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-msg assistant">
+          <div class="chat-bubble">
+            👋 Hi! I'm your AI-powered cybersecurity assistant for Bengaluru commuters.<br/><br/>
+            I can help you with:<br/>
+            • Understanding Wi-Fi security risks<br/>
+            • Safe browsing practices<br/>
+            • What to do after a suspected incident<br/>
+            • Reporting cyber crimes in India<br/><br/>
+            What would you like to know?
+          </div>
+          <div class="chat-meta">AI Assistant · IBM Granite</div>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <div class="suggested-questions" id="suggestedQuestions">
+          <span class="sq-label">Try:</span>
+          <button class="sq-btn" onclick="askQuestion('Is public Wi-Fi at Namma Metro safe?')">Is Namma Metro Wi-Fi safe?</button>
+          <button class="sq-btn" onclick="askQuestion('What is an evil twin Wi-Fi attack?')">What is evil twin attack?</button>
+          <button class="sq-btn" onclick="askQuestion('How do I use a VPN on Android?')">How to use VPN?</button>
+          <button class="sq-btn" onclick="askQuestion('I think my account was compromised, what do I do?')">Account compromised?</button>
+        </div>
+        <div class="chat-input-row">
+          <input type="text" id="chatInput" placeholder="Ask about Wi-Fi safety…"
+                 maxlength="500" onkeypress="if(event.key==='Enter')sendChat()"/>
+          <button class="btn-primary" onclick="sendChat()" id="chatSendBtn">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── PANEL: HISTORY ──────────────────────────────────────────── -->
+<section class="panel" id="panel-history">
+  <div class="page-title">
+    <h1>Assessment History</h1>
+    <p class="subtitle">Recent Wi-Fi risk assessments and task records</p>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>📋 Task History</h2>
+      <button class="btn-sm" onclick="loadHistory()">🔄 Refresh</button>
+    </div>
+    <div id="historyTable">
+      <div class="loading-msg">Loading history…</div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── PANEL: ANALYTICS ────────────────────────────────────────── -->
+<section class="panel" id="panel-analytics">
+  <div class="page-title">
+    <h1>Performance Analytics</h1>
+    <p class="subtitle">Real agent metrics · API performance · Risk distribution</p>
+  </div>
+
+  <div class="card-row three-col" id="analyticsCards">
+    <div class="stat-card">
+      <div class="stat-value" id="anaTotal">—</div>
+      <div class="stat-label">Total Tasks</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value low-color" id="anaComplete">—</div>
+      <div class="stat-label">Completed</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value high-color" id="anaErrors">—</div>
+      <div class="stat-label">Errors</div>
+    </div>
+  </div>
+
+  <!-- Provider performance -->
+  <div class="card">
+    <div class="card-header"><h2>⚡ AI Provider Performance</h2></div>
+    <div id="providerStats">
+      <div class="loading-msg">Loading analytics…</div>
+    </div>
+  </div>
+
+  <!-- Risk distribution -->
+  <div class="card-row two-col">
+    <div class="card">
+      <div class="card-header"><h2>📊 Risk Distribution</h2></div>
+      <div id="riskDistribution"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>🔗 Agent Handoff Success</h2></div>
+      <div id="agentHandoffs"></div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ═══ LOADING OVERLAY ═══════════════════════════════════════════════════ -->
+<div id="loadingOverlay" class="loading-overlay hidden">
+  <div class="loading-modal">
+    <div class="spinner"></div>
+    <div class="loading-title" id="loadingTitle">Analyzing…</div>
+    <div class="loading-steps" id="loadingSteps"></div>
+    <div class="loading-note">AI agents are collaborating to assess your Wi-Fi safety</div>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
