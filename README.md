@@ -4,9 +4,9 @@ IBM Inter-Institute Hackathon – Bengaluru Commuter Cybersecurity
 
 ## Overview
 
-An Agentic AI application that helps Bengaluru commuters assess public Wi-Fi risks 
-using IBM Granite as the primary model, with Google Gemini and Groq as secondary models.
-Three specialized AI agents collaborate under a central Supervisor/Orchestrator.
+An Agentic AI application that helps Bengaluru commuters assess public Wi-Fi risks
+using IBM Granite through IBM watsonx.ai as its only active AI provider. Three
+specialized AI agents collaborate under a central Supervisor/Orchestrator.
 
 ## Architecture
 
@@ -19,7 +19,7 @@ User → Frontend Dashboard → Flask Backend → Supervisor/Orchestrator
                            │  Agent 3: Incident Response & Safety Guidance │
                            └──────────────────────────────────────────────┘
                                                       ↓
-                           IBM Granite (primary) | Groq | Gemini (secondary)
+                           IBM Granite through IBM watsonx.ai
 ```
 
 ## Three AI Agents
@@ -28,15 +28,14 @@ User → Frontend Dashboard → Flask Backend → Supervisor/Orchestrator
 |-------|------|----------|
 | Agent 1: Network Risk Assessment | Analyzes Wi-Fi context, generates Low/Medium/High risk | IBM Granite |
 | Agent 2: Device Safety & Prevention | Device checklist, browsing safety, banking guidance | IBM Granite |
-| Agent 3: Incident Response & Safety Guidance | Phishing guidance, incident reporting, final report | Groq / Gemini |
+| Agent 3: Incident Response & Safety Guidance | Phishing guidance, incident reporting, final report | IBM Granite |
 
 ## Quick Start
 
 ### Prerequisites
 - Python 3.10+
 - IBM Cloud account with watsonx.ai access
-- Google Gemini API key
-- Groq API key
+- watsonx.ai project ID
 
 ### Installation
 
@@ -63,12 +62,10 @@ python backend/app.py
 ### Access
 Open `http://localhost:5000` in your browser.
 
-## API Keys Required
+## IBM watsonx.ai Configuration
 
 1. **IBM Cloud API Key** – https://cloud.ibm.com/iam/apikeys
 2. **watsonx.ai Project ID** – https://dataplatform.cloud.ibm.com/projects/
-3. **Google Gemini API Key** – https://aistudio.google.com/app/apikey
-4. **Groq API Key** – https://console.groq.com/keys
 
 ## Project Structure
 
@@ -87,8 +84,7 @@ ibm hackathon/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── granite_service.py    # IBM Granite/watsonx.ai
-│   │   ├── gemini_service.py     # Google Gemini
-│   │   ├── groq_service.py       # Groq
+│   │   ├── groq_service.py       # Legacy disabled provider service
 │   │   └── ai_model_manager.py   # Centralized AI model selection
 │   └── security/
 │       ├── __init__.py
@@ -117,7 +113,7 @@ ibm hackathon/
 4. Supervisor passes findings to Agent 2 (Device Safety)
 5. Agent 2 generates device checklist via IBM Granite
 6. Supervisor passes all context to Agent 3 (Incident Response)
-7. Agent 3 produces final safety report (Groq/Gemini for speed)
+7. Agent 3 produces the final safety report using IBM Granite
 8. Supervisor consolidates → unified response displayed on dashboard
 
 ## Safety Restrictions

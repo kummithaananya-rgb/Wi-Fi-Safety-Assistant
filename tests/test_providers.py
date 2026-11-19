@@ -25,6 +25,13 @@ class StubProvider:
             raise self.error
         return dict(self.result)
 
+    def test_connection(self):
+        return {
+            "success": self.is_available and bool(self.result.get("success")),
+            "provider": self.provider,
+            "test": True,
+        }
+
 
 def _result(provider, *, success=True, text="ok", error=None):
     return {
@@ -32,9 +39,7 @@ def _result(provider, *, success=True, text="ok", error=None):
         "text": text,
         "model": f"{provider}-test-model",
         "provider": provider,
-        "provider_status": (
-            "primary_success" if provider == "granite" else "fallback_success"
-        ),
+        "provider_status": "primary_success",
         "duration_ms": 10,
         "prompt_tokens": 2,
         "completion_tokens": 1,
@@ -42,12 +47,11 @@ def _result(provider, *, success=True, text="ok", error=None):
     }
 
 
-def _manager(granite, gemini):
+def _manager(granite):
     from services.ai_model_manager import AIModelManager
 
     manager = AIModelManager.__new__(AIModelManager)
     manager.granite = granite
-    manager.gemini = gemini
     return manager
 
 
@@ -111,94 +115,116 @@ class TestProviderErrorClassification:
 class TestAIModelManager:
     def test_granite_success_is_attributed_as_primary(self):
         granite = StubProvider("granite", result=_result("granite", text="Granite"))
-        gemini = StubProvider("gemini", result=_result("gemini", text="Gemini"))
 
-        result = _manager(granite, gemini).generate("same prompt")
+        result = _manager(granite).generate("same prompt")
 
         assert result["success"] is True
         assert result["text"] == "Granite"
         assert result["provider"] == "granite"
         assert result["provider_status"] == "primary_success"
-        assert gemini.calls == []
-
-    @pytest.mark.parametrize("error_code", ["timeout", "rate_limit", "authentication"])
-    def test_granite_failure_falls_back_to_gemini_with_same_request(self, error_code):
-        granite = StubProvider(
-            "granite",
-            result=_result("granite", success=False, text="", error=error_code),
-        )
-        gemini = StubProvider("gemini", result=_result("gemini", text="Gemini"))
-        manager = _manager(granite, gemini)
-
-        result = manager.generate(
-            "same prompt", provider="auto", max_tokens=123, temperature=0.6
-        )
-
-        assert result["success"] is True
-        assert result["provider"] == "gemini"
-        assert result["provider_status"] == "fallback_success"
-        assert result["fallback_reason"] == error_code
         assert result["provider_attempts"] == [
-            {"provider": "granite", "status": "failed", "error": error_code},
-            {"provider": "gemini", "status": "success"},
+            {"provider": "granite", "status": "success"},
         ]
-        assert granite.calls == gemini.calls
-        assert gemini.calls[0] == {
-            "prompt": "same prompt",
-            "max_tokens": 123,
-            "temperature": 0.6,
-        }
+        assert result["fallback_reason"] is None
 
-    def test_both_providers_failing_returns_safe_complete_failure(self):
+    def test_status_exposes_only_granite_as_an_active_provider(self):
+        manager = _manager(
+            StubProvider("granite", available=True, result=_result("granite"))
+        )
+
+        status = manager.status()
+
+        assert status["granite"]["available"] is True
+        assert status["granite"]["role"] == "primary"
+        assert status["groq"]["available"] is False
+        assert "gemini" not in status
+
+    def test_granite_failure_returns_safe_failure_without_fallback(self):
         secret_like_error = "request failed; api_key=must-not-escape"
         granite = StubProvider(
             "granite",
-            result=_result("granite", success=False, text="", error=secret_like_error),
+            result=_result(
+                "granite", success=False, text="", error=secret_like_error
+            ),
         )
-        gemini = StubProvider(
-            "gemini",
-            result=_result("gemini", success=False, text="", error=secret_like_error),
-        )
-
-        result = _manager(granite, gemini).generate("prompt")
+        result = _manager(granite).generate("same prompt")
 
         assert result["success"] is False
         assert result["text"] == ""
         assert result["provider"] == "none"
         assert result["provider_status"] == "failed"
         assert result["error"] == "all_providers_failed"
+        assert result["provider_attempts"] == [
+            {"provider": "granite", "status": "failed", "error": "provider_error"},
+        ]
+        assert len(granite.calls) == 1
         assert secret_like_error not in repr(result)
 
-    def test_gemini_authentication_exception_is_sanitized(self):
+    def test_granite_unavailable_returns_safe_failure(self):
+        granite = StubProvider("granite", available=False, result={})
+
+        result = _manager(granite).generate("prompt")
+
+        assert result["success"] is False
+        assert result["text"] == ""
+        assert result["provider"] == "none"
+        assert result["provider_status"] == "failed"
+        assert result["error"] == "all_providers_failed"
+        assert result["provider_attempts"] == [
+            {"provider": "granite", "status": "unavailable", "error": "not_configured"},
+        ]
+
+    def test_provider_exception_is_sanitized_and_not_retried(self):
         class AuthenticationError(Exception):
             pass
 
-        granite = StubProvider("granite", available=False, result={})
-        gemini = StubProvider(
-            "gemini",
-            error=AuthenticationError("token=do-not-show"),
+        granite = StubProvider(
+            "granite", error=AuthenticationError("token=do-not-show")
         )
 
-        result = _manager(granite, gemini).generate("prompt")
+        result = _manager(granite).generate("prompt")
 
         assert result["success"] is False
         assert result["provider_status"] == "failed"
         assert result["provider_attempts"] == [
-            {"provider": "granite", "status": "unavailable", "error": "not_configured"},
-            {"provider": "gemini", "status": "failed", "error": "authentication"},
+            {"provider": "granite", "status": "failed", "error": "authentication"},
         ]
         assert "do-not-show" not in repr(result)
-
-    def test_provider_exception_timeout_is_attempted_once_then_falls_back(self):
-        granite = StubProvider("granite", error=TimeoutError("private detail"))
-        gemini = StubProvider("gemini", result=_result("gemini", text="Recovered"))
-
-        result = _manager(granite, gemini).generate("prompt")
-
-        assert result["provider"] == "gemini"
-        assert result["fallback_reason"] == "timeout"
         assert len(granite.calls) == 1
-        assert len(gemini.calls) == 1
+
+    def test_legacy_groq_request_uses_only_granite(self):
+        granite = StubProvider("granite", result=_result("granite", text="Granite"))
+
+        result = _manager(granite).generate("prompt", provider="groq")
+
+        assert result["success"] is True
+        assert result["provider"] == "granite"
+        assert result["provider_status"] == "primary_success"
+        assert len(granite.calls) == 1
+
+    def test_removed_provider_name_is_rejected(self):
+        granite = StubProvider("granite", result=_result("granite"))
+
+        result = _manager(granite).generate("prompt", provider="gemini")
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_provider"
+        assert granite.calls == []
+
+    def test_malformed_granite_response_is_not_reported_as_success(self):
+        granite = StubProvider(
+            "granite",
+            result={"success": True, "text": ["not", "text"]},
+        )
+
+        result = _manager(granite).generate("prompt")
+
+        assert result["success"] is False
+        assert result["text"] == ""
+        assert result["provider"] == "none"
+        assert result["provider_attempts"] == [
+            {"provider": "granite", "status": "failed", "error": "invalid_response"},
+        ]
 
 
 class TestProviderServices:
@@ -427,56 +453,6 @@ class TestProviderServices:
         assert "private" not in repr(result)
         service._model.chat.assert_called_once()
 
-    def test_gemini_authentication_error_is_safe(self, monkeypatch):
-        import services.gemini_service as gemini_module
-
-        class AuthenticationError(Exception):
-            pass
-
-        client = MagicMock()
-        client.models.generate_content.side_effect = AuthenticationError(
-            "api_key=private"
-        )
-        monkeypatch.setattr(gemini_module, "GEMINI_AVAILABLE", True)
-        monkeypatch.setattr(
-            gemini_module,
-            "genai",
-            MagicMock(Client=MagicMock(return_value=client)),
-        )
-        monkeypatch.setattr(
-            gemini_module,
-            "genai_types",
-            MagicMock(),
-        )
-
-        result = gemini_module.GeminiService("test-key", "gemini-model").generate(
-            "prompt"
-        )
-
-        assert result["success"] is False
-        assert result["error"] == "authentication"
-        assert "private" not in repr(result)
-        client.models.generate_content.assert_called_once()
-
-    def test_gemini_client_uses_bounded_sdk_timeout(self, monkeypatch):
-        import services.gemini_service as gemini_module
-
-        client = MagicMock()
-        types = MagicMock()
-        monkeypatch.setattr(gemini_module, "GEMINI_AVAILABLE", True)
-        monkeypatch.setattr(
-            gemini_module,
-            "genai",
-            MagicMock(Client=MagicMock(return_value=client)),
-        )
-        monkeypatch.setattr(gemini_module, "genai_types", types)
-
-        service = gemini_module.GeminiService("test-key", "gemini-model")
-
-        types.HttpOptions.assert_called_once_with(timeout=30_000)
-        assert service.is_available is True
-
-
 def test_live_verifier_refuses_to_call_providers_without_opt_in(monkeypatch, capsys):
     from scripts.verify_ai_providers import main
 
@@ -495,7 +471,7 @@ class TestAgentProviderRouting:
         from agents.agent3_incident import IncidentResponseAgent
 
         responses = [
-            _result("gemini", text=json.dumps({
+            _result("granite", text=json.dumps({
                 "risk_level": "LOW",
                 "risk_score": 1,
                 "summary": "High risk",
@@ -505,7 +481,7 @@ class TestAgentProviderRouting:
                 "explanation": "High risk details.",
                 "cert_in_reference": "",
             })),
-            _result("gemini", text=json.dumps({
+            _result("granite", text=json.dumps({
                 "threat_explanation": "Use caution.",
                 "immediate_actions": ["Use mobile data."],
                 "browsing_tips": ["Check HTTPS."],
@@ -513,7 +489,7 @@ class TestAgentProviderRouting:
                 "bengaluru_specific": "Verify the network name.",
                 "recovery_note": "Contact your bank if needed.",
             })),
-            _result("gemini", text=json.dumps({
+            _result("granite", text=json.dumps({
                 "incident_scenario": "general",
                 "severity": "HIGH",
                 "situation_summary": "Use caution.",
@@ -539,12 +515,12 @@ class TestAgentProviderRouting:
             "auto", "auto", "auto",
         ]
         assert [agent["provider"] for agent in (agent1, agent2, agent3)] == [
-            "gemini", "gemini", "gemini",
+            "granite", "granite", "granite",
         ]
         assert agent1["risk_level"] == "HIGH"
         assert agent1["risk_score"] >= 80
         assert [agent["provider_status"] for agent in (agent1, agent2, agent3)] == [
-            "fallback_success", "fallback_success", "fallback_success",
+            "primary_success", "primary_success", "primary_success",
         ]
 
     def test_guardrails_block_before_provider_calls(self):

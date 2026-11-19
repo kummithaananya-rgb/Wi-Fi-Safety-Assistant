@@ -65,7 +65,7 @@ class ModelCallLog(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     task_id = Column(String(36))
     timestamp = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc))
-    provider = Column(String(50))   # granite | gemini | groq
+    provider = Column(String(50))   # provider used at call time; historical names retained
     model_id = Column(String(100))
     agent_name = Column(String(50))
     prompt_tokens = Column(Integer)

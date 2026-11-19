@@ -15,7 +15,6 @@ def app_client():
     """Flask test client with mocked dependencies."""
     # Patch all external AI services before importing app
     with patch('services.granite_service.GraniteService._init'), \
-         patch('services.gemini_service.GeminiService._init'), \
          patch('services.groq_service.GroqService._init'), \
          patch('database.DatabaseManager._init_engine'):
 
@@ -39,7 +38,7 @@ def app_client():
             "agent_statuses": {
                 "agent1": {"name": "Agent 1", "status": "complete", "model": "granite"},
                 "agent2": {"name": "Agent 2", "status": "complete", "model": "granite"},
-                "agent3": {"name": "Agent 3", "status": "complete", "model": "groq"},
+                "agent3": {"name": "Agent 3", "status": "complete", "model": "granite"},
             },
             "execution_log": [],
             "total_duration_ms": 3200,
@@ -49,8 +48,7 @@ def app_client():
         flask_app.ai_manager = MagicMock()
         flask_app.ai_manager.status.return_value = {
             "granite": {"available": False, "model": "ibm/granite-4-h-small"},
-            "gemini": {"available": False, "model": "gemini-1.5-flash"},
-            "groq": {"available": False, "model": "llama-3.1-70b-versatile"},
+            "groq": {"available": False, "model": "disabled"},
         }
         flask_app.ai_manager.generate.return_value = {
             "success": True, "text": "Test response", "model": "test", "provider": "test",
@@ -58,7 +56,6 @@ def app_client():
         }
         flask_app.ai_manager.test_all.return_value = {
             "granite": {"success": False, "error": "Not configured", "test": True},
-            "gemini": {"success": False, "error": "Not configured", "test": True},
             "groq": {"success": False, "error": "Not configured", "test": True},
         }
 
@@ -154,6 +151,8 @@ class TestModelEndpoints:
         data = r.get_json()
         assert 'providers' in data
         assert data['primary'] == 'IBM Granite (watsonx.ai)'
+        assert data['secondary'] == []
+        assert 'gemini' not in data['providers']
 
     def test_model_test_all(self, app_client):
         r = app_client.post('/api/models/test',
@@ -163,11 +162,21 @@ class TestModelEndpoints:
         data = r.get_json()
         assert 'results' in data
         assert 'granite' in data['results']
-        assert 'gemini' in data['results']
         assert 'groq' in data['results']
+        assert 'gemini' not in data['results']
         assert data['results']['granite']['error'] == (
             'Provider test failed. Check server logs for details.'
         )
+
+    def test_removed_provider_is_rejected(self, app_client):
+        response = app_client.post(
+            '/api/models/test',
+            json={"provider": "gemini"},
+            content_type='application/json',
+        )
+
+        assert response.status_code == 400
+        assert response.get_json()['error'] == 'Unknown provider'
 
 
 class TestTaskEndpoints:

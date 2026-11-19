@@ -139,20 +139,20 @@ def assess():
 
 @app.route("/api/models/status", methods=["GET"])
 def model_status():
-    """Return status of all three AI model providers."""
+    """Return status of the active AI provider and disabled legacy providers."""
     return jsonify({
         "success": True,
         "providers": ai_manager.status(),
         "primary": "IBM Granite (watsonx.ai)",
-        "secondary": ["Google Gemini", "Groq"],
+        "secondary": [],
     })
 
 
 @app.route("/api/models/test", methods=["POST"])
 def test_models():
     """
-    Test all three AI providers independently.
-    POST body: {} or {"provider": "granite"|"gemini"|"groq"|"all"}
+    Test IBM Granite and the disabled legacy Groq stub.
+    POST body: {} or {"provider": "granite"|"groq"|"all"}
     """
     data = request.get_json(silent=True) or {}
     provider = data.get("provider", "all")
@@ -161,8 +161,6 @@ def test_models():
         results = ai_manager.test_all()
     elif provider == "granite":
         results = {"granite": ai_manager.granite.test_connection()}
-    elif provider == "gemini":
-        results = {"gemini": ai_manager.gemini.test_connection()}
     elif provider == "groq":
         results = {"groq": ai_manager.groq.test_connection()}
     else:
@@ -293,7 +291,7 @@ if __name__ == "__main__":
     )
     logger.info(
         f"AI Providers – Granite: {Config.has_granite()}, "
-        f"Gemini: {Config.has_gemini()}, Groq: {Config.has_groq()}"
+        f"Groq: {Config.has_groq()}"
     )
     app.run(
         host=Config.HOST,

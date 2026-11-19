@@ -35,13 +35,13 @@
 │  │Network Risk │  │Device Safety │  │Incident Response   │         │
 │  │Assessment   │  │& Prevention  │  │& Safety Guidance   │         │
 │  │             │  │              │  │                    │         │
-│  │IBM Granite  │  │IBM Granite   │  │Groq (primary)      │         │
-│  │(primary)    │  │(primary)     │  │Gemini (backup)     │         │
+│  │IBM Granite  │  │IBM Granite   │  │IBM Granite         │         │
+│  │(only model) │  │(only model)  │  │(only model)        │         │
 │  └─────────────┘  └──────────────┘  └────────────────────┘         │
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │               AI MODEL MANAGER                               │    │
-│  │  IBM Granite (watsonx.ai) │ Google Gemini │ Groq            │    │
+│  │          IBM Granite (watsonx.ai) only                      │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                      │
 │  ┌────────────┐  ┌──────────────────────┐  ┌───────────────────┐   │
@@ -111,13 +111,13 @@ The **Supervisor/Orchestrator** runs input through **Guardrails**:
 }
 ```
 
-### Step 5: Agent 3 – Incident Response (Groq → Gemini fallback)
+### Step 5: Agent 3 – Incident Response (IBM Granite)
 **Input received:** Combined Agent 1 + Agent 2 outputs
 
 **Processing:**
 1. Identifies incident scenario (phishing, account_compromise, fake_portal, general)
-2. Groq API call for fast incident response guidance
-3. Falls back to Google Gemini if Groq unavailable
+2. IBM Granite API call for incident response guidance
+3. If Granite is unavailable, the agent uses its existing safe response path
 4. Generates final comprehensive safety report
 
 **Output produced (returned to Supervisor):**
@@ -140,15 +140,15 @@ The **Supervisor/Orchestrator** runs input through **Guardrails**:
 
 ## AI Model Assignment Strategy
 
-| Task | Primary Model | Fallback |
-|------|--------------|---------|
-| Risk Analysis (Agent 1) | IBM Granite | Rule-based |
-| Device Safety (Agent 2) | IBM Granite | Static checklist |
-| Incident Response (Agent 3) | Groq (fast) | Google Gemini |
-| Conversational Chat | IBM Granite | Groq → Gemini |
-| Model Testing | All three independently | — |
+| Task | Active Model | Failure behavior |
+|------|--------------|------------------|
+| Risk Analysis (Agent 1) | IBM Granite | Existing deterministic risk assessment |
+| Device Safety (Agent 2) | IBM Granite | Existing static checklist |
+| Incident Response (Agent 3) | IBM Granite | Existing safe response path |
+| Conversational Chat | IBM Granite | Safe unavailable response |
+| Model Testing | IBM Granite | Disabled Groq compatibility check |
 
-**Key principle:** IBM Granite is used for primary reasoning. Groq is used for Agent 3's fast incident response. Gemini backs up Groq. This avoids sending every request to all three models.
+**Key principle:** IBM Granite through watsonx.ai is the only active AI provider. There is no secondary model or automatic provider fallback. A Granite failure remains a failure and is handled through the application's existing safe responses. A disabled Groq compatibility stub is retained but is never used to generate responses.
 
 ---
 
@@ -191,8 +191,7 @@ ibm hackathon/
 │   │   └── agent3_incident.py    # Agent 3: Incident Response
 │   ├── services/
 │   │   ├── granite_service.py    # IBM watsonx.ai / Granite
-│   │   ├── gemini_service.py     # Google Gemini
-│   │   ├── groq_service.py       # Groq
+│   │   ├── groq_service.py       # Legacy disabled service; not routed
 │   │   └── ai_model_manager.py   # Centralized provider selection
 │   └── security/
 │       └── guardrails.py         # All security/validation logic

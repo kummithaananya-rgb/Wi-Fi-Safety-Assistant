@@ -34,7 +34,6 @@ def main():
     logger.info(f"  Listening : http://{args.host}:{args.port}")
     logger.info(f"  Threads   : {args.threads}")
     logger.info(f"  Granite   : {'configured' if Config.has_granite() else 'NOT configured'}")
-    logger.info(f"  Gemini    : {'configured' if Config.has_gemini() else 'NOT configured'}")
     logger.info("=" * 60)
 
     from waitress import serve

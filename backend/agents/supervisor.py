@@ -49,7 +49,7 @@ class SupervisorOrchestrator:
     1. Validate and understand the user request
     2. Assign task to Agent 1 (Risk Assessment) → IBM Granite
     3. Pass Agent 1 output to Agent 2 (Device Safety) → IBM Granite
-    4. Pass Agents 1+2 output to Agent 3 (Incident Response) → Granite/Gemini
+    4. Pass Agents 1+2 output to Agent 3 (Incident Response) → Granite
     5. Consolidate all outputs into one unified response
     6. Log metrics and persist to database
     """
@@ -334,6 +334,12 @@ class SupervisorOrchestrator:
         risk = a1.get("risk_level", "UNKNOWN")
         checklist = a2.get("device_checklist", [])
         final_report = dict(a3.get("final_report", {}))
+        warning_signs = self._dedupe_strings(a1.get("warning_signs", []))
+        risk_factors = self._dedupe_strings(a1.get("risk_factors", []))
+        positive_indicators = self._dedupe_strings(a1.get("positive_indicators", []))
+        final_report["warning_signs"] = self._dedupe_strings(
+            final_report.get("warning_signs", warning_signs)
+        )
 
         severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
         incident_severity = a3.get("severity", risk)
@@ -355,9 +361,13 @@ class SupervisorOrchestrator:
             "risk_summary": a1.get("summary", ""),
             "risk_explanation": risk_explanation,
             "disclaimer": disclaimer,
-            "warning_signs": a1.get("warning_signs", []),
-            "risk_factors": a1.get("risk_factors", []),
-            "positive_indicators": a1.get("positive_indicators", []),
+            "warning_signs": warning_signs,
+            "risk_factors": risk_factors,
+            "positive_indicators": positive_indicators,
+            "assessment_basis": (
+                a1.get("assessment_basis", {})
+                if isinstance(a1.get("assessment_basis", {}), dict) else {}
+            ),
             "cert_in_reference": a1.get("cert_in_reference", ""),
 
             "device_checklist": checklist,
@@ -410,6 +420,21 @@ class SupervisorOrchestrator:
                 },
             },
         }
+
+    @staticmethod
+    def _dedupe_strings(values: Any) -> list:
+        if not isinstance(values, list):
+            return []
+        unique = []
+        seen = set()
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            normalized = " ".join(value.split()).casefold()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique.append(value.strip())
+        return unique
 
     def _log_model_call(self, task_id: str, agent_output: Dict, agent_name: str):
         """Log AI model call metrics to database."""

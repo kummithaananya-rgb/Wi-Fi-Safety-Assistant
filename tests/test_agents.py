@@ -20,8 +20,6 @@ def mock_config():
     cfg.IBM_WATSONX_PROJECT_ID = "test-project"
     cfg.IBM_WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
     cfg.IBM_GRANITE_MODEL_ID = "ibm/granite-4-h-small"
-    cfg.GOOGLE_GEMINI_API_KEY = "test-gemini-key"
-    cfg.GEMINI_MODEL_ID = "gemini-1.5-flash"
     cfg.GROQ_API_KEY = "test-groq-key"
     cfg.GROQ_MODEL_ID = "llama-3.1-70b-versatile"
     return cfg
@@ -44,16 +42,12 @@ def mock_ai_manager():
     manager.granite = MagicMock()
     manager.granite.is_available = True
     manager.granite.model_id = "ibm/granite-4-h-small"
-    manager.gemini = MagicMock()
-    manager.gemini.is_available = True
-    manager.gemini.model_id = "gemini-1.5-flash"
     manager.groq = MagicMock()
-    manager.groq.is_available = True
-    manager.groq.model_id = "llama-3.1-70b-versatile"
+    manager.groq.is_available = False
+    manager.groq.model_id = "disabled"
     manager.status.return_value = {
         "granite": {"available": True, "model": "ibm/granite-4-h-small", "provider": "IBM watsonx.ai"},
-        "gemini": {"available": True, "model": "gemini-1.5-flash", "provider": "Google Gemini"},
-        "groq": {"available": True, "model": "llama-3.1-70b-versatile", "provider": "Groq"},
+        "groq": {"available": False, "model": "disabled", "provider": "Groq (disabled)"},
     }
     return manager
 
@@ -80,6 +74,8 @@ class TestNetworkRiskAgent:
         agent = NetworkRiskAgent(mock_ai_manager)
         result = agent._pre_analyze("FreeWifi", "open", "Namma Metro", "")
         assert result["pre_risk"] == "HIGH"
+        assert result["risk_score"] == 80
+        assert any("no Wi-Fi password" in factor for factor in result["risk_factors"])
         assert len(result["flags"]) > 0
 
     def test_pre_analysis_wpa2_enterprise(self, mock_ai_manager):
@@ -87,12 +83,67 @@ class TestNetworkRiskAgent:
         agent = NetworkRiskAgent(mock_ai_manager)
         result = agent._pre_analyze("CorpNet", "wpa2-enterprise", "Office", "")
         assert result["pre_risk"] == "LOW"
+        assert result["risk_score"] == 20
 
-    def test_suspicious_ssid(self, mock_ai_manager):
+    def test_ssid_does_not_change_open_network_risk(self, mock_ai_manager):
         from agents.agent1_risk import NetworkRiskAgent
         agent = NetworkRiskAgent(mock_ai_manager)
         result = agent._pre_analyze("SBI_Bank_WiFi_Free", "open", "Mall", "")
         assert result["pre_risk"] == "HIGH"
+        assert result["risk_score"] == 80
+        assert not any("name pattern" in factor for factor in result["risk_factors"])
+
+    def test_unknown_provider_and_security_have_explained_medium_score(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        result = NetworkRiskAgent(mock_ai_manager)._pre_analyze(
+            "Station WiFi", "unknown", "Railway station", ""
+        )
+
+        assert result["pre_risk"] == "MEDIUM"
+        assert result["risk_score"] == 50
+        assert any("provider" in factor for factor in result["risk_factors"])
+        assert any("status are unknown" in factor for factor in result["risk_factors"])
+        assert result["score_breakdown"] == [
+            "Public Wi-Fi baseline: +10",
+            "Provider not supplied/unverified: +10",
+            "Unknown Wi-Fi security/authentication: +30",
+        ]
+
+    def test_generic_ssid_and_railway_location_do_not_raise_risk(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        result = NetworkRiskAgent(mock_ai_manager)._pre_analyze(
+            "Free Public WiFi", "wpa3", "Railway station", ""
+        )
+
+        assert result["pre_risk"] == "LOW"
+        assert result["risk_score"] == 20
+        assert result["warning_signs"] == []
+
+    def test_duplicate_ssid_and_denied_warning_are_not_risk_signals(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        agent = NetworkRiskAgent(mock_ai_manager)
+
+        duplicate = agent._pre_analyze(
+            "Station WiFi", "wpa3", "Railway station", "I see the same SSID twice."
+        )
+        denied_warning = agent._pre_analyze(
+            "Station WiFi", "wpa3", "", "There is no certificate warning."
+        )
+
+        assert duplicate["pre_risk"] == "LOW"
+        assert denied_warning["pre_risk"] == "LOW"
+        assert duplicate["warning_signs"] == []
+        assert denied_warning["warning_signs"] == []
+
+    def test_reported_warning_is_labeled_as_unverified(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        result = NetworkRiskAgent(mock_ai_manager)._pre_analyze(
+            "Station WiFi", "wpa3", "", "A certificate warning appeared."
+        )
+
+        assert result["pre_risk"] == "HIGH"
+        assert result["risk_score"] == 80
+        assert "not independently verified" in result["warning_signs"][0]
 
     def test_full_assess_returns_risk_level(self, mock_ai_manager):
         from agents.agent1_risk import NetworkRiskAgent
@@ -102,7 +153,34 @@ class TestNetworkRiskAgent:
         assert result["risk_level"] in ("LOW", "MEDIUM", "HIGH")
         assert result["agent"] == "Agent 1: Network Risk Assessment"
         assert result["status"] == "complete"
-        assert result["summary"] == "High risk network"
+        assert result["risk_level"] == "LOW"
+        assert result["risk_score"] == 20
+        assert result["summary"] == "Rule-based assessment: LOW risk (20/100)"
+        assert "Confirmed input" in result["explanation"]
+        assert "not independently verified" in result["explanation"]
+
+    def test_model_cannot_raise_risk_for_generic_ssid_or_location(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        import json
+
+        mock_ai_manager.generate.return_value["text"] = json.dumps({
+            "risk_level": "HIGH",
+            "risk_score": 99,
+            "summary": "The network is malicious.",
+            "warning_signs": ["Generic SSID"],
+            "risk_factors": ["Railway location"],
+            "positive_indicators": [],
+            "explanation": "The SSID and location look suspicious.",
+            "cert_in_reference": "",
+        })
+        result = NetworkRiskAgent(mock_ai_manager).assess(
+            "Free Public WiFi", "wpa3", "Railway station", "", "generic-ssid"
+        )
+
+        assert result["risk_level"] == "LOW"
+        assert result["risk_score"] == 20
+        assert result["summary"] == "Rule-based assessment: LOW risk (20/100)"
+        assert "AI-suggested potential concern (unverified): Generic SSID" in result["warning_signs"]
 
     def test_model_json_cannot_override_trusted_metadata(self, mock_ai_manager):
         from agents.agent1_risk import NetworkRiskAgent
@@ -135,6 +213,47 @@ class TestNetworkRiskAgent:
         assert result["pre_analysis"]["pre_risk"] == "HIGH"
         assert result["model_used"] == "ibm/granite-4-h-small"
         assert result["risk_level"] == "HIGH"
+
+    def test_model_warning_signs_and_factors_are_deduplicated(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        import json
+
+        mock_ai_manager.generate.return_value["text"] = json.dumps({
+            "risk_level": "HIGH",
+            "risk_score": 85,
+            "summary": "Open Wi-Fi.",
+            "warning_signs": [
+                "certificate warning", "Repeated warning", " repeated   WARNING "
+            ],
+            "risk_factors": [
+                "Network operator/provider was not supplied or independently verified.",
+                "Repeated factor", " repeated   FACTOR ",
+            ],
+            "positive_indicators": [],
+            "explanation": "An open network was reported.",
+            "cert_in_reference": "",
+        })
+        result = NetworkRiskAgent(mock_ai_manager).assess(
+            "Guest", "open", "", "A certificate warning appeared.", "dedupe-risk"
+        )
+
+        for field in ("warning_signs", "risk_factors"):
+            normalized = [" ".join(item.split()).casefold() for item in result[field]]
+            assert len(normalized) == len(set(normalized))
+        assert sum("certificate warning" in item.lower() for item in result["warning_signs"]) == 1
+        assert sum("provider" in item.lower() for item in result["risk_factors"]) == 1
+
+    def test_medium_fallback_score_comes_from_scored_factors(self, mock_ai_manager):
+        from agents.agent1_risk import NetworkRiskAgent
+        agent = NetworkRiskAgent(mock_ai_manager)
+        pre = agent._pre_analyze("Station WiFi", "unknown", "Railway station", "")
+
+        fallback = agent._fallback_assessment(pre, "Station WiFi", "unknown")
+
+        assert fallback["risk_level"] == "MEDIUM"
+        assert fallback["risk_score"] == 50
+        assert "VPN may add a layer" in fallback["explanation"]
+        assert fallback["assessment_basis"]["user_provided_assumptions"] == []
 
     def test_malformed_model_json_uses_rule_based_fallback(self, mock_ai_manager):
         from agents.agent1_risk import NetworkRiskAgent
@@ -199,7 +318,9 @@ class TestNetworkRiskAgent:
         assert result["risk_level"] == "HIGH"
         assert result["risk_score"] >= 80
         assert "appears safe" not in result["explanation"]
-        assert result["pre_analysis"]["flags"][0] in result["warning_signs"]
+        assert any(
+            "no Wi-Fi password" in factor for factor in result["risk_factors"]
+        )
 
     def test_unsafe_model_output_uses_rule_based_fallback(self, mock_ai_manager):
         from agents.agent1_risk import NetworkRiskAgent
@@ -245,6 +366,20 @@ class TestDeviceSafetyAgent:
         from agents.agent2_device import BANKING_GUIDANCE
         assert "AVOID" in BANKING_GUIDANCE["HIGH"]["recommendation"]
 
+    def test_banking_guidance_prioritizes_mobile_data_and_limits_vpn_claims(self, mock_ai_manager):
+        from agents.agent2_device import BANKING_GUIDANCE, DEVICE_CHECKLIST_BY_RISK
+        for risk in ("HIGH", "MEDIUM", "LOW"):
+            details = " ".join(BANKING_GUIDANCE[risk]["details"]).lower()
+            assert "mobile data" in details
+        assert "does not guarantee security" in " ".join(
+            BANKING_GUIDANCE["MEDIUM"]["details"]
+        )
+        high_vpn = next(
+            item for item in DEVICE_CHECKLIST_BY_RISK["HIGH"] if item["id"] == "vpn"
+        )
+        assert "mobile data" in DEVICE_CHECKLIST_BY_RISK["HIGH"][0]["action"].lower()
+        assert "does not prevent" in high_vpn["why"]
+
 
 # ── Agent 3 Tests ──────────────────────────────────────────────────────────
 
@@ -254,9 +389,22 @@ class TestIncidentResponseAgent:
         agent = IncidentResponseAgent(mock_ai_manager)
         scenario = agent._identify_scenario(
             ["Suspicious login portal detected"],
-            "it redirected me to a login page"
+            "it redirected me to an unknown site and asked for my password"
         )
         assert scenario == "phishing"
+
+    def test_duplicate_ssid_alone_is_not_a_fake_portal_incident(self, mock_ai_manager):
+        from agents.agent3_incident import IncidentResponseAgent
+        agent = IncidentResponseAgent(mock_ai_manager)
+        assert agent._identify_scenario([], "I saw the same network name twice") == "general"
+
+    def test_fallback_does_not_claim_vpn_guarantees_safety(self, mock_ai_manager):
+        from agents.agent3_incident import IncidentResponseAgent
+        fallback = IncidentResponseAgent(mock_ai_manager)._fallback_response(
+            "general", "MEDIUM", "Station WiFi", "Railway station"
+        )
+        assert "mobile data" in fallback["prevention_summary"].lower()
+        assert "does not guarantee security" in fallback["prevention_summary"].lower()
 
     def test_identify_scenario_general(self, mock_ai_manager):
         from agents.agent3_incident import IncidentResponseAgent
@@ -379,6 +527,44 @@ class TestGuardrails:
 # ── Supervisor Tests ───────────────────────────────────────────────────────
 
 class TestSupervisor:
+    def test_consolidation_deduplicates_risk_lists_and_preserves_assessment_basis(
+        self, mock_ai_manager, mock_db
+    ):
+        from agents.supervisor import SupervisorOrchestrator
+        from security.guardrails import Guardrails
+
+        supervisor = SupervisorOrchestrator(
+            mock_ai_manager,
+            mock_db,
+            Guardrails(),
+            {"agent1": MagicMock(), "agent2": MagicMock(), "agent3": MagicMock()},
+        )
+        basis = {
+            "confirmed_information": ["Security type entered: open."],
+            "potential_threats": ["Unencrypted traffic may be exposed."],
+            "user_provided_assumptions": [],
+        }
+        result = supervisor._consolidate(
+            {
+                "risk_level": "HIGH",
+                "warning_signs": ["Open network", " open   NETWORK "],
+                "risk_factors": ["No Wi-Fi password", " no wi-fi PASSWORD "],
+                "positive_indicators": [],
+                "assessment_basis": basis,
+                "explanation": "Open security was reported.",
+            },
+            {},
+            {"final_report": {"warning_signs": ["Warning", " warning "]}},
+            "dedupe-task",
+            [],
+            0,
+        )
+
+        assert result["warning_signs"] == ["Open network"]
+        assert result["risk_factors"] == ["No Wi-Fi password"]
+        assert result["final_report"]["warning_signs"] == ["Warning"]
+        assert result["assessment_basis"] == basis
+
     def test_sanitized_values_are_stored_and_passed_to_agents(self, mock_ai_manager, mock_db):
         from agents.agent1_risk import NetworkRiskAgent
         from agents.agent2_device import DeviceSafetyAgent
@@ -465,8 +651,8 @@ class TestSupervisor:
         agent3.respond.return_value = {
             "agent": "Agent 3",
             "status": "complete",
-            "model_used": "gemini",
-            "provider": "gemini",
+            "model_used": "granite",
+            "provider": "granite",
             "duration_ms": 1,
             "identified_scenario": "general",
             "incident_scenario": "general",
@@ -649,7 +835,7 @@ class TestSupervisor:
         from agents.supervisor import SupervisorOrchestrator
         from security.guardrails import Guardrails
 
-        # Agent 3 also needs groq response
+        # All three agents use the Granite-only provider manager.
         call_count = [0]
         def side_effect(**kwargs):
             call_count[0] += 1
@@ -663,7 +849,7 @@ class TestSupervisor:
             return {
                 "success": True,
                 "text": '{"incident_scenario":"general","severity":"HIGH","situation_summary":"High risk","immediate_steps":["Disconnect"],"if_credentials_entered":"Change passwords","reporting_guidance":"Call 1930","prevention_summary":"Use VPN","bengaluru_transit_tip":"Use 4G"}',
-                "model": "llama-3.1-70b-versatile", "provider": "groq",
+                "model": "ibm/granite-4-h-small", "provider": "granite",
                 "duration_ms": 800, "prompt_tokens": 100, "completion_tokens": 60, "error": None,
             }
 

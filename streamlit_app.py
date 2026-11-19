@@ -133,15 +133,11 @@ with st.sidebar:
     status = ai_manager.status()
 
     granite = status["granite"]
-    gemini  = status["gemini"]
 
     g_icon = "🟢" if granite["available"] else "🔴"
-    gm_icon = "🟢" if gemini["available"] else "🟡"
 
     st.markdown(f"{g_icon} **IBM Granite** `{granite['model']}`")
-    st.caption("Primary – watsonx.ai")
-    st.markdown(f"{gm_icon} **Google Gemini** `{gemini['model']}`")
-    st.caption("Secondary / fallback")
+    st.caption("Only active AI provider – watsonx.ai")
     st.divider()
 
     st.markdown("### 📋 Navigation")
@@ -320,26 +316,30 @@ def _render_result(result: dict):
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "🏠 Dashboard":
     st.title("🛡️ Public Wi-Fi Safety Dashboard")
-    st.markdown("**AI-powered protection for Bengaluru commuters · IBM Granite + Google Gemini**")
+    st.markdown("**AI-powered protection for Bengaluru commuters · IBM Granite**")
     st.divider()
 
     # Model status cards
     st.subheader("🤖 AI Model Status")
-    c1, c2, c3 = st.columns(3)
-    for col, (key, label, role, url) in zip([c1, c2, c3], [
-        ("granite", "IBM Granite",    "Primary",           "watsonx.ai"),
-        ("gemini",  "Google Gemini",  "Secondary/Fallback","aistudio.google.com"),
-        ("groq",    "Groq",           "Disabled",          "–"),
+    c1, c2 = st.columns(2)
+    for col, (key, label, role) in zip([c1, c2], [
+        ("granite", "IBM Granite", "Only active provider"),
+        ("groq",    "Groq",        "Disabled"),
     ]):
         with col:
             info = status[key]
             avail = info.get("available", False)
-            icon = "🟢" if avail else ("🔴" if key != "groq" else "⚫")
+            icon = "🟢" if avail else ("🔴" if key == "granite" else "⚫")
+            model_status = (
+                "Disabled"
+                if info.get("role") == "disabled"
+                else "Available ✓" if avail else "Unavailable ✗"
+            )
             with st.container(border=True):
                 st.markdown(f"### {icon} {label}")
                 st.caption(f"**Role:** {role}")
                 st.caption(f"**Model:** `{info.get('model','–')}`")
-                st.caption(f"**Status:** {'Available ✓' if avail else 'Unavailable ✗'}")
+                st.caption(f"**Status:** {model_status}")
 
     st.divider()
 
@@ -375,7 +375,7 @@ if page == "🏠 Dashboard":
 **How it works:**
 1. **Agent 1 (Network Risk)** – IBM Granite assesses the network's risk level
 2. **Agent 2 (Device Safety)** – IBM Granite gives device-specific protection advice
-3. **Agent 3 (Incident Response)** – Gemini provides emergency response steps
+3. **Agent 3 (Incident Response)** – IBM Granite provides emergency response steps
 4. **Supervisor** – Consolidates all three outputs into one unified report
 """)
 
@@ -395,10 +395,19 @@ elif page == "🔍 Risk Assessment":
                 "Wi-Fi Network Name (SSID) *",
                 placeholder="e.g. BMTC_Free_WiFi, Namma_Metro_WiFi",
             )
+            connection_labels = {
+                "unknown": "Unknown / not visible",
+                "open": "Open (no Wi-Fi password)",
+                "wep": "WEP (weak security)",
+                "wpa2": "WPA2",
+                "wpa3": "WPA3",
+                "captive_portal": "Captive portal (Wi-Fi security unknown)",
+            }
             connection_type = st.selectbox(
                 "Connection Type",
-                ["wpa2", "wpa3", "captive_portal", "unknown"],
-                index=3,
+                ["unknown", "open", "wep", "wpa2", "wpa3", "captive_portal"],
+                index=0,
+                format_func=lambda value: connection_labels[value],
             )
         with col2:
             location = st.text_input(

@@ -56,16 +56,18 @@ async function checkHealth() {
 
 function updateModelBadges(models) {
   if (!models) return;
-  updateOneBadge('modelGranite', models.granite, 'granite');
-  updateOneBadge('modelGroq', models.groq, 'groq');
-  updateOneBadge('modelGemini', models.gemini, 'gemini');
+  updateOneBadge('modelGranite', models.granite);
+  updateOneBadge('modelGroq', models.groq);
 }
 
-function updateOneBadge(cardId, info, name) {
+function updateOneBadge(cardId, info) {
   const card = document.getElementById(cardId);
   if (!card || !info) return;
   const badge = card.querySelector('.model-badge');
-  if (info.available) {
+  if (info.role === 'disabled') {
+    badge.className = 'model-badge unavailable';
+    badge.textContent = 'Disabled';
+  } else if (info.available) {
     badge.className = 'model-badge ok';
     badge.textContent = '● Active';
   } else {
@@ -75,7 +77,7 @@ function updateOneBadge(cardId, info, name) {
 }
 
 function setAllModelBadges(cls, text) {
-  ['modelGranite','modelGroq','modelGemini'].forEach(id => {
+  ['modelGranite','modelGroq'].forEach(id => {
     const b = document.querySelector(`#${id} .model-badge`);
     if (b) { b.className = `model-badge ${cls}`; b.textContent = text; }
   });
@@ -127,7 +129,7 @@ document.getElementById('assessForm').addEventListener('submit', async (e) => {
     { label: 'Guardrail validation', agentId: null },
     { label: 'Agent 1: Network Risk Assessment (IBM Granite)', agentId: 'pipeAgent1' },
     { label: 'Agent 2: Device Safety & Prevention (IBM Granite)', agentId: 'pipeAgent2' },
-    { label: 'Agent 3: Incident Response (Groq/Gemini)', agentId: 'pipeAgent3' },
+    { label: 'Agent 3: Incident Response (IBM Granite)', agentId: 'pipeAgent3' },
     { label: 'Supervisor consolidation', agentId: 'pipeSupervisor' },
   ];
   renderLoadingSteps(steps);
@@ -492,10 +494,13 @@ function renderProviderStats(stats) {
     el.innerHTML = '<div class="loading-msg">No API calls recorded yet. Run an assessment first.</div>';
     return;
   }
-  const names = {granite:'IBM Granite (watsonx.ai)', gemini:'Google Gemini', groq:'Groq'};
+  const names = {
+    granite: 'IBM Granite (watsonx.ai)',
+    groq: 'Groq (disabled)',
+  };
   el.innerHTML = Object.entries(stats).map(([provider, s]) => `
     <div class="provider-stat">
-      <div class="provider-name">${names[provider]||provider}</div>
+      <div class="provider-name">${names[provider] || 'Historical provider'}</div>
       <div class="provider-bar-wrap">
         <div class="provider-bar" style="width:${s.success_rate||0}%"></div>
       </div>

@@ -29,10 +29,6 @@ class Config:
         "IBM_GRANITE_MODEL_ID", "ibm/granite-4-h-small"
     )
 
-    # Google Gemini (secondary / fallback)
-    GOOGLE_GEMINI_API_KEY: str = os.getenv("GOOGLE_GEMINI_API_KEY", "")
-    GEMINI_MODEL_ID: str = os.getenv("GEMINI_MODEL_ID", "models/gemini-3.5-flash")
-
     # Groq – disabled; kept for schema compatibility only
     GROQ_API_KEY: str = ""
     GROQ_MODEL_ID: str = ""
@@ -57,10 +53,6 @@ class Config:
     @classmethod
     def has_granite(cls) -> bool:
         return bool(cls.IBM_CLOUD_API_KEY and cls.IBM_WATSONX_PROJECT_ID)
-
-    @classmethod
-    def has_gemini(cls) -> bool:
-        return bool(cls.GOOGLE_GEMINI_API_KEY)
 
     @classmethod
     def has_groq(cls) -> bool:
@@ -108,7 +100,7 @@ def setup_logging():
 
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
     # Suppress noisy third-party loggers
-    for lib in ("urllib3", "httpx", "httpcore", "google.auth"):
+    for lib in ("urllib3", "httpx", "httpcore"):
         logging.getLogger(lib).setLevel(logging.WARNING)
 
 

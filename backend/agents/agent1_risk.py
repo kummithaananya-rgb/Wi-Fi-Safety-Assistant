@@ -14,24 +14,6 @@ from security.guardrails import OutputValidator
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Suspicious pattern library (synthetic + CERT-In / I4C advisories)
-# ---------------------------------------------------------------------------
-SUSPICIOUS_NAME_PATTERNS: List[str] = [
-    r"free.*wifi", r"public.*wifi", r"open.*wifi", r"guest.*wifi",
-    r"airport.*free", r"train.*free", r"metro.*free", r"namma.*metro.*free",
-    r"ksrtc.*free", r"bangalore.*free", r"bengaluru.*free",
-    r"starbucks.*free", r"mcdonald.*free", r"hotel.*free",
-    r"bank.*wifi", r"secure.*bank", r"sbi.*wifi", r"hdfc.*wifi",
-    r"atm.*wifi", r"payment.*wifi",
-    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",   # IP-as-SSID
-    r"linksys", r"netgear", r"dlink", r"tp-?link",         # default router names
-    r"xfinity", r"optimum",                                # US ISP (unusual in BLR)
-    r"evil\s*twin", r"honeypot",
-]
-SUSPICIOUS_PATTERNS_COMPILED = [
-    re.compile(p, re.IGNORECASE) for p in SUSPICIOUS_NAME_PATTERNS
-]
 ASSESSMENT_OUTPUT_FIELDS = frozenset({
     "risk_level",
     "risk_score",
@@ -43,22 +25,36 @@ ASSESSMENT_OUTPUT_FIELDS = frozenset({
     "cert_in_reference",
 })
 
-RISKY_CONNECTION_TYPES = {"open", "unsecured", "none", "wep"}
-MEDIUM_RISK_TYPES = {"wpa", "wpa2-personal"}
-LOW_RISK_TYPES = {"wpa2-enterprise", "wpa3", "wpa3-enterprise", "802.1x"}
+NO_AUTHENTICATION_TYPES = {"open", "unsecured", "none"}
+WEAK_ENCRYPTION_TYPES = {"wep"}
+UNKNOWN_SECURITY_TYPES = {"", "unknown", "other", "captive_portal"}
+MODERATE_SECURITY_TYPES = {"wpa", "wpa2", "wpa2-personal"}
+SECURED_TYPES = {
+    "wpa2-enterprise", "wpa3", "wpa3-personal", "wpa3-enterprise",
+    "802.1x", "secured",
+}
 
-RISKY_LOCATIONS = [
-    "railway station", "metro station", "bus stand", "airport",
-    "café", "coffee shop", "mall", "market", "public park",
-]
+BASE_PUBLIC_WIFI_SCORE = 10
+UNKNOWN_PROVIDER_SCORE = 10
+UNKNOWN_SECURITY_SCORE = 30
+NO_AUTHENTICATION_SCORE = 60
+WEAK_ENCRYPTION_SCORE = 60
+MODERATE_SECURITY_SCORE = 10
+REPORTED_WARNING_SCORE = 60
 
-HIGH_RISK_INDICATORS = [
-    "asks for login", "login portal", "redirects", "captive portal",
-    "asks for personal info", "asks for phone number", "asks for email",
-    "certificate warning", "ssl error", "https warning",
-    "not familiar", "unfamiliar", "strange", "unusual",
-    "same name as", "same as", "duplicate",
-]
+HIGH_RISK_INDICATORS = (
+    "certificate warning",
+    "ssl error",
+    "https warning",
+    "redirected to unknown site",
+    "redirects to unknown site",
+    "unexpected login page",
+    "asks for password",
+    "asked for password",
+    "asked for my password",
+    "asks for otp",
+    "asks for bank details",
+)
 
 
 class NetworkRiskAgent:
@@ -83,6 +79,9 @@ IMPORTANT RULES:
 - Never ask for or use passwords, banking credentials, or sensitive personal data
 - Base assessment only on user-provided non-sensitive information
 - Always classify risk as exactly: LOW, MEDIUM, or HIGH
+- Do not infer maliciousness from a generic SSID, network brand, or location
+- Treat user-provided network details and context as unverified reports
+- The deterministic rule-based risk level and score are authoritative; do not change them
 - Never claim any network is 100% safe
 - Reference CERT-In and I4C guidelines where applicable
 - Be specific, practical and educational
@@ -107,51 +106,181 @@ FORMAT your response as JSON with these exact keys:
     def _pre_analyze(self, wifi_name: str, connection_type: str,
                      location: str, user_context: str) -> Dict[str, Any]:
         """
-        Rule-based pre-analysis before sending to LLM.
-        Detects obvious patterns quickly and cheaply.
+        Score only reported security properties and explicit user-reported warnings.
         """
-        flags: List[str] = []
-        pre_risk = "LOW"
+        conn_lower = (connection_type or "").strip().lower()
+        ctx_lower = (user_context or "").strip().lower()
+        score = BASE_PUBLIC_WIFI_SCORE + UNKNOWN_PROVIDER_SCORE
+        score_breakdown = [
+            f"Public Wi-Fi baseline: +{BASE_PUBLIC_WIFI_SCORE}",
+            f"Provider not supplied/unverified: +{UNKNOWN_PROVIDER_SCORE}",
+        ]
+        risk_factors = [
+            "Public Wi-Fi is a shared medium; use encryption and avoid sensitive activity.",
+            "Network operator/provider was not supplied or independently verified.",
+        ]
+        potential_threats = [
+            "The operator's legitimacy is unknown; this alone does not establish malicious activity."
+        ]
 
-        wifi_lower = (wifi_name or "").lower()
-        conn_lower = (connection_type or "").lower()
-        ctx_lower = (user_context or "").lower()
+        if conn_lower in NO_AUTHENTICATION_TYPES:
+            score += NO_AUTHENTICATION_SCORE
+            score_breakdown.append(
+                f"No Wi-Fi password authentication: +{NO_AUTHENTICATION_SCORE}"
+            )
+            risk_factors.append("The reported connection has no Wi-Fi password authentication.")
+            potential_threats.append(
+                "On an open network, other users may be able to observe unencrypted traffic."
+            )
+        elif conn_lower in WEAK_ENCRYPTION_TYPES:
+            score += WEAK_ENCRYPTION_SCORE
+            score_breakdown.append(f"Weak WEP security: +{WEAK_ENCRYPTION_SCORE}")
+            risk_factors.append("WEP is a weak, outdated Wi-Fi security protocol.")
+            potential_threats.append(
+                "WEP's known weaknesses can make network traffic more exposed."
+            )
+        elif conn_lower in UNKNOWN_SECURITY_TYPES or conn_lower not in (
+            MODERATE_SECURITY_TYPES | SECURED_TYPES
+        ):
+            score += UNKNOWN_SECURITY_SCORE
+            score_breakdown.append(
+                f"Unknown Wi-Fi security/authentication: +{UNKNOWN_SECURITY_SCORE}"
+            )
+            risk_factors.append("Wi-Fi encryption and authentication status are unknown.")
+            potential_threats.append(
+                "Because Wi-Fi security is unknown, the connection's protections cannot be assessed."
+            )
+        elif conn_lower in MODERATE_SECURITY_TYPES:
+            score += MODERATE_SECURITY_SCORE
+            score_breakdown.append(
+                f"Shared-credential security mode: +{MODERATE_SECURITY_SCORE}"
+            )
+            risk_factors.append(
+                f"The reported {connection_type} security mode may use credentials shared with other users."
+            )
 
-        # 1. Suspicious SSID patterns
-        for pat in SUSPICIOUS_PATTERNS_COMPILED:
-            if pat.search(wifi_lower):
-                flags.append(f"Suspicious Wi-Fi name pattern: '{wifi_name}'")
-                pre_risk = "MEDIUM"
-                break
+        reported_indicators = [
+            indicator for indicator in HIGH_RISK_INDICATORS
+            if self._is_affirmative_report(ctx_lower, indicator)
+        ]
+        warning_signs = [
+            f"User-reported concern: {indicator} (not independently verified)."
+            for indicator in reported_indicators
+        ]
+        if reported_indicators:
+            score += REPORTED_WARNING_SCORE
+            score_breakdown.append(
+                f"User-reported security warning: +{REPORTED_WARNING_SCORE}"
+            )
+            potential_threats.append(
+                "A security or unexpected-page warning was reported; it may indicate a risk, "
+                "but has not been independently verified."
+            )
 
-        # 2. Connection security type
-        if conn_lower in RISKY_CONNECTION_TYPES:
-            flags.append(f"Insecure connection type: {connection_type}")
-            pre_risk = "HIGH" if pre_risk != "HIGH" else "HIGH"
-        elif conn_lower in MEDIUM_RISK_TYPES:
-            flags.append(f"Moderate security: {connection_type}")
-            if pre_risk == "LOW":
-                pre_risk = "LOW"  # WPA2-personal alone is acceptable
+        score = min(100, score)
+        pre_risk = "HIGH" if score >= 80 else ("MEDIUM" if score >= 50 else "LOW")
+        risk_factors = self._dedupe_text(risk_factors)
+        warning_signs = self._dedupe_text(warning_signs)
+        flags = self._dedupe_text(risk_factors + warning_signs)
 
-        # 3. Location risk
-        for risky_loc in RISKY_LOCATIONS:
-            if risky_loc in (location or "").lower():
-                flags.append(f"High-risk public location: {location}")
-                if pre_risk == "LOW":
-                    pre_risk = "MEDIUM"
-                break
+        submitted = [
+            f"SSID entered by the user: {wifi_name or 'not provided'}.",
+            f"Security type entered by the user: {connection_type or 'not provided'}.",
+            f"Location entered by the user: {location or 'not provided'}.",
+            "Network operator/provider was not supplied or independently verified.",
+        ]
+        user_context_items = (
+            [f"User-reported context: {user_context.strip()} (not independently verified)."]
+            if user_context and user_context.strip() else []
+        )
+        return {
+            "pre_risk": pre_risk,
+            "risk_score": score,
+            "flags": flags,
+            "risk_factors": risk_factors,
+            "warning_signs": warning_signs,
+            "confirmed_information": submitted,
+            "potential_threats": self._dedupe_text(potential_threats),
+            "user_provided_assumptions": user_context_items,
+            "score_breakdown": score_breakdown,
+        }
 
-        # 4. High-risk context indicators
-        for indicator in HIGH_RISK_INDICATORS:
-            if indicator in ctx_lower:
-                flags.append(f"High-risk indicator: {indicator}")
-                pre_risk = "HIGH"
+    @staticmethod
+    def _dedupe_text(values: List[str]) -> List[str]:
+        unique = []
+        seen = set()
+        for value in values:
+            normalized = " ".join(value.split()).casefold()
+            for prefix in (
+                "user-reported concern: ",
+                "ai-suggested potential concern (unverified): ",
+                "ai-suggested risk factor (unverified): ",
+                "ai-suggested positive indicator (unverified): ",
+            ):
+                if normalized.startswith(prefix):
+                    normalized = normalized[len(prefix):]
+                    break
+            normalized = normalized.replace(" (not independently verified)", "")
+            normalized = normalized.strip().rstrip(".")
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique.append(value.strip())
+        return unique
 
-        # 5. No encryption = always HIGH
-        if conn_lower in {"open", "none", "unsecured", "wep"}:
-            pre_risk = "HIGH"
+    @staticmethod
+    def _is_affirmative_report(context: str, indicator: str) -> bool:
+        start = context.find(indicator)
+        if start < 0:
+            return False
+        prefix = context[max(0, start - 48):start]
+        return not re.search(
+            r"\b(?:no|not|never|without|didn't|did not|doesn't|does not|"
+            r"haven't|have not|hasn't|has not)\s+(?:\w+\s+){0,3}$",
+            prefix,
+        )
 
-        return {"pre_risk": pre_risk, "flags": flags}
+    def _assessment_basis(self, pre: Dict[str, Any]) -> Dict[str, List[str]]:
+        return {
+            "confirmed_information": pre["confirmed_information"],
+            "potential_threats": pre["potential_threats"],
+            "user_provided_assumptions": pre["user_provided_assumptions"],
+            "score_breakdown": pre["score_breakdown"],
+        }
+
+    def _format_explanation(self, model_explanation: str, pre: Dict[str, Any]) -> str:
+        sections = [
+            (
+                f"Deterministic rule-based assessment: {pre['pre_risk']} risk "
+                f"({pre['risk_score']}/100)."
+            ),
+            (
+                "Confirmed input (the application confirms only that these values "
+                "were entered; it has not independently verified them):\n- "
+                + "\n- ".join(pre["confirmed_information"])
+            ),
+            "Score components:\n- " + "\n- ".join(pre["score_breakdown"]),
+            (
+                "Potential threats (possible, not confirmed or tested):\n- "
+                + "\n- ".join(pre["potential_threats"])
+            ),
+            (
+                "User-provided context/assumptions (unverified):\n- "
+                + (
+                    "\n- ".join(pre["user_provided_assumptions"])
+                    if pre["user_provided_assumptions"] else "None supplied."
+                )
+            ),
+            (
+                "Safety recommendation: Prefer mobile data for banking and other "
+                "sensitive activities. A VPN may add a layer of protection but does "
+                "not guarantee security."
+            ),
+        ]
+        if model_explanation:
+            sections.append(
+                f"AI interpretation (unverified): {model_explanation.strip()}"
+            )
+        return "\n\n".join(sections)
 
     def assess(
         self,
@@ -182,8 +311,10 @@ FORMAT your response as JSON with these exact keys:
 {chr(10).join('- ' + f for f in pre['flags']) if pre['flags'] else '- None detected by rule engine'}
 
 Initial rule-based risk estimate: {pre['pre_risk']}
+Initial rule-based risk score: {pre['risk_score']}/100
 
 Analyze ALL provided details and return a comprehensive JSON risk assessment.
+Do not treat an SSID, provider identity, or location as proof of malicious activity.
 Consider this is in Bengaluru, India. Reference CERT-In advisories where relevant.
 Return ONLY valid JSON, no markdown fences."""
 
@@ -255,7 +386,7 @@ Return ONLY valid JSON, no markdown fences."""
         wifi_name: str,
         connection_type: str,
     ) -> Dict[str, Any]:
-        """Parse model JSON, enforcing output shape and the deterministic risk floor."""
+        """Parse model JSON while keeping the deterministic score authoritative."""
         # Strip markdown code fences if present
         clean = re.sub(r"```(?:json)?", "", text).strip().strip("`").strip()
         try:
@@ -303,64 +434,53 @@ Return ONLY valid JSON, no markdown fences."""
             fallback["output_validation_fallback"] = True
             return fallback
 
-        risk_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-        minimum_risk = pre["pre_risk"]
-        if risk_rank[risk] < risk_rank[minimum_risk]:
-            risk = minimum_risk
-            fallback = self._fallback_assessment(pre, wifi_name, connection_type)
-            data["summary"] = fallback["summary"]
-            data["explanation"] = fallback["explanation"]
-
-        if minimum_risk == "HIGH":
-            fallback = self._fallback_assessment(pre, wifi_name, connection_type)
-            data["summary"] = fallback["summary"]
-            data["explanation"] = fallback["explanation"]
-
-        data["warning_signs"] = list(dict.fromkeys(
-            data["warning_signs"] + pre["flags"]
-        ))
-        data["risk_factors"] = list(dict.fromkeys(
-            data["risk_factors"] + pre["flags"]
-        ))
-
-        score_floor = {"LOW": 0, "MEDIUM": 50, "HIGH": 80}[risk]
-        data["risk_level"] = risk
-        data["risk_score"] = min(
-            100,
-            max(score_floor, int(data["risk_score"])),
+        model_warnings = [
+            f"AI-suggested potential concern (unverified): {item}"
+            for item in data["warning_signs"]
+        ]
+        model_factors = [
+            f"AI-suggested risk factor (unverified): {item}"
+            for item in data["risk_factors"]
+        ]
+        data["warning_signs"] = self._dedupe_text(
+            pre["warning_signs"] + model_warnings
         )
+        data["risk_factors"] = self._dedupe_text(
+            pre["risk_factors"] + model_factors
+        )
+        data["positive_indicators"] = self._dedupe_text([
+            f"AI-suggested positive indicator (unverified): {item}"
+            for item in data["positive_indicators"]
+        ])
+        data["risk_level"] = pre["pre_risk"]
+        data["risk_score"] = pre["risk_score"]
+        data["summary"] = (
+            f"Rule-based assessment: {pre['pre_risk']} risk "
+            f"({pre['risk_score']}/100)"
+        )
+        model_explanation = data["explanation"] if risk == pre["pre_risk"] else ""
+        data["explanation"] = self._format_explanation(model_explanation, pre)
+        data["assessment_basis"] = self._assessment_basis(pre)
         return data
 
     def _fallback_assessment(self, pre: Dict, wifi_name: str,
                              connection_type: str) -> Dict[str, Any]:
         """Pure rule-based fallback when AI is unavailable."""
         risk = pre["pre_risk"]
-        score = {"HIGH": 80, "MEDIUM": 55, "LOW": 20}[risk]
-        explanations = {
-            "HIGH": (
-                "The supplied connection details include high-risk indicators. "
-                "Avoid sensitive activities on this network and consider switching "
-                "to mobile data."
-            ),
-            "MEDIUM": (
-                f"The Wi-Fi network '{wifi_name}' has some concerning characteristics. "
-                "Exercise caution and avoid banking or sensitive transactions."
-            ),
-            "LOW": (
-                f"The Wi-Fi network '{wifi_name}' appears relatively safe based on "
-                "provided information, but public Wi-Fi always carries some risk."
-            ),
-        }
+        score = pre["risk_score"]
+        explanation = self._format_explanation("", pre)
         return {
             "risk_level": risk,
             "risk_score": score,
-            "summary": f"Rule-based assessment: {risk} risk",
-            "warning_signs": pre["flags"],
-            "risk_factors": pre["flags"],
+            "summary": f"Rule-based assessment: {risk} risk ({score}/100)",
+            "warning_signs": pre["warning_signs"],
+            "risk_factors": pre["risk_factors"],
             "positive_indicators": (
-                ["Secured connection type"] if connection_type.upper() in
-                {t.upper() for t in LOW_RISK_TYPES} else []
+                [f"Reported security type: {connection_type} (not independently verified)."]
+                if (connection_type or "").strip().lower() in
+                (MODERATE_SECURITY_TYPES | SECURED_TYPES) else []
             ),
-            "explanation": explanations[risk],
+            "explanation": explanation,
+            "assessment_basis": self._assessment_basis(pre),
             "cert_in_reference": "https://www.cert-in.org.in/",
         }

@@ -2,7 +2,7 @@
 Agent 3: Incident Response & Safety Guidance Agent
 Receives aggregated findings from Agents 1 & 2.
 Provides incident response, phishing awareness, and generates final safety report.
-Uses IBM Granite through the provider manager, with Google Gemini as fallback.
+Uses IBM Granite through the provider manager.
 """
 import re
 import json
@@ -82,7 +82,7 @@ IMMEDIATE_RESPONSE_BY_SCENARIO = {
         "Warn others around you about the suspicious network",
     ],
     "general": [
-        "Disconnect from the suspicious network",
+        "Disconnect from the Wi-Fi network if you no longer need it",
         "Switch to mobile data (4G/5G)",
         "Monitor accounts for unusual activity",
         "Keep emergency contacts handy: Cyber Helpline 1930",
@@ -113,6 +113,8 @@ RULES:
 - Reference official Indian resources: CERT-In, I4C, cybercrime.gov.in, helpline 1930
 - Use clear, simple language for non-technical users  
 - Never claim any network is safe
+- Treat user reports as unverified; a generic or duplicate SSID, location, or login portal alone does not prove malicious activity
+- Recommend mobile data for banking and explain that a VPN does not guarantee security
 - Prioritize user safety and data protection
 
 Return JSON with these exact keys:
@@ -189,7 +191,7 @@ Return ONLY valid JSON, no markdown fences."""
         )
         if not result["success"]:
             logger.warning(
-                "[%s] All configured providers failed; using static incident guidance",
+                "[%s] Granite unavailable; using static incident guidance",
                 self.AGENT_NAME,
             )
 
@@ -235,15 +237,19 @@ Return ONLY valid JSON, no markdown fences."""
         signs = " ".join(warning_signs).lower() if warning_signs else ""
         combined = ctx + " " + signs
 
-        if any(w in combined for w in ["phishing", "login portal", "fake portal",
-                                        "redirected", "sent otp"]):
-            return "phishing"
         if any(w in combined for w in ["account", "compromised", "logged in",
                                         "unauthorized", "hacked"]):
             return "account_compromise"
-        if any(w in combined for w in ["fake", "impersonate", "evil twin",
-                                        "duplicate", "same name"]):
+        if any(w in combined for w in ["fake portal", "fake access point",
+                                        "impersonate", "evil twin"]):
             return "fake_portal"
+        if any(w in combined for w in [
+            "phishing", "unexpected login page", "redirected to unknown site",
+            "redirected me to an unknown site", "sent otp", "asks for password",
+            "asked for my password", "asked for password", "certificate error", "ssl warning",
+            "login page looks like bank",
+        ]):
+            return "phishing"
         return "general"
 
     def _parse_llm_output(self, text: str, scenario: str, risk_level: str,
@@ -279,10 +285,10 @@ Return ONLY valid JSON, no markdown fences."""
                 "For cybersecurity incidents, email CERT-In: cert-in@cert-in.org.in"
             ),
             "prevention_summary": (
-                "1. Always use a VPN on public Wi-Fi. "
-                "2. Use mobile data for banking. "
-                "3. Verify network names with staff before connecting. "
-                "4. Enable 2FA on all important accounts."
+                "1. Prefer mobile data for banking and other sensitive activity. "
+                "2. A VPN may add a layer of protection but does not guarantee security. "
+                "3. Verify network details with staff; a name alone does not prove legitimacy. "
+                "4. Enable 2FA on important accounts."
             ),
             "bengaluru_transit_tip": (
                 "On Namma Metro, KSRTC, or BMTC: verify the official network name "

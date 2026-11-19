@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 
 DEVICE_CHECKLIST_BY_RISK = {
     "HIGH": [
-        {"id": "vpn", "priority": "CRITICAL", "category": "Network",
-         "action": "Enable a trusted VPN immediately before any activity",
-         "why": "VPN encrypts your traffic, preventing eavesdropping on open networks"},
         {"id": "wifi_off", "priority": "CRITICAL", "category": "Network",
-         "action": "Consider disconnecting and using mobile data instead",
-         "why": "Mobile data (4G/5G) is significantly safer than unsecured public Wi-Fi"},
+         "action": "Disconnect and use mobile data for banking and other sensitive activity",
+         "why": "Avoids routing sensitive activity over this shared public Wi-Fi network"},
+        {"id": "vpn", "priority": "HIGH", "category": "Network",
+         "action": "If you remain on Wi-Fi, consider a trusted VPN as an additional layer",
+         "why": "A VPN adds protection for part of the traffic path but does not prevent phishing, unsafe apps, or all monitoring"},
         {"id": "no_banking", "priority": "CRITICAL", "category": "Banking",
-         "action": "Do NOT access banking, UPI, or any financial apps",
-         "why": "Credentials can be intercepted on insecure networks"},
+         "action": "Do NOT access banking, UPI, or financial apps while connected to this Wi-Fi",
+         "why": "Disconnect and switch to mobile data if you need to transact"},
         {"id": "no_otp", "priority": "CRITICAL", "category": "Banking",
          "action": "Do NOT enter OTPs or passwords on this network",
          "why": "Man-in-the-middle attacks can capture authentication data"},
@@ -51,8 +51,8 @@ DEVICE_CHECKLIST_BY_RISK = {
     ],
     "MEDIUM": [
         {"id": "vpn_recommended", "priority": "HIGH", "category": "Network",
-         "action": "Use a VPN for sensitive activities",
-         "why": "Adds encryption even on partially secured networks"},
+         "action": "If you remain on Wi-Fi, a trusted VPN may add a layer of protection",
+         "why": "A VPN adds a layer of protection but does not guarantee security or replace mobile data"},
         {"id": "banking_caution", "priority": "HIGH", "category": "Banking",
          "action": "Avoid banking and UPI transactions; use mobile data instead",
          "why": "WPA2-Personal networks can still be attacked with dictionary attacks"},
@@ -81,7 +81,7 @@ DEVICE_CHECKLIST_BY_RISK = {
          "why": "Good security hygiene regardless of network type"},
         {"id": "vpn_good_practice", "priority": "LOW", "category": "Network",
          "action": "Consider using a VPN as a good practice",
-         "why": "Encrypts traffic and protects privacy"},
+         "why": "A VPN can protect some traffic but does not guarantee security"},
         {"id": "app_updates", "priority": "LOW", "category": "Security",
          "action": "Keep your device OS and security apps updated",
          "why": "Maintains protection against emerging threats"},
@@ -107,7 +107,7 @@ BANKING_GUIDANCE = {
         "recommendation": "CAUTION – Use mobile data for banking",
         "details": [
             "Strongly prefer mobile data over this Wi-Fi for financial transactions",
-            "If using this network, ensure VPN is active",
+            "A VPN may add a layer of protection, but it does not guarantee security or replace mobile data",
             "Only use official bank apps (not browser) for transactions",
             "Verify certificate on banking websites before proceeding",
         ],
@@ -116,6 +116,7 @@ BANKING_GUIDANCE = {
     "LOW": {
         "recommendation": "Exercise standard caution",
         "details": [
+            "Prefer mobile data for banking and other sensitive activity; no Wi-Fi assessment can guarantee safety",
             "Prefer official banking apps over browser",
             "Verify HTTPS and certificate on banking websites",
             "Log out immediately after completing transactions",
@@ -151,6 +152,10 @@ RULES:
 - Use simple language accessible to non-technical users
 - Reference Indian-specific resources (CERT-In, I4C, cybercrime.gov.in)
 - Never ask for passwords, credentials, or sensitive data
+- Treat user-provided network details and context as unverified reports
+- Do not claim a threat occurred without evidence
+- Recommend mobile data for banking and other sensitive activity
+- Explain that a VPN is an additional layer, not a guarantee of security
 - Focus on education and prevention
 
 Provide a JSON response with these exact keys:
@@ -256,25 +261,25 @@ Return ONLY valid JSON, no markdown fences."""
                            location: str) -> Dict[str, Any]:
         threat_map = {
             "HIGH": (
-                "This network shows HIGH risk indicators. "
-                "Threats include man-in-the-middle attacks, packet sniffing, "
-                "evil twin attacks, and fake captive portals designed to steal credentials."
+                "The submitted details produce a HIGH risk score, but do not prove an attack. "
+                "An open or weak network can expose unencrypted traffic; phishing or "
+                "impersonation are possible threats, not confirmed events."
             ),
             "MEDIUM": (
-                "This network has MEDIUM risk characteristics. "
-                "Potential threats include passive traffic monitoring, "
-                "credential interception if not using HTTPS, and WPA2 brute-force attacks."
+                "The submitted details produce a MEDIUM score because provider or security "
+                "information is unknown. Protections cannot be verified, but this is not "
+                "evidence that the network is malicious."
             ),
             "LOW": (
-                "This network appears relatively safe but public Wi-Fi "
-                "always carries inherent risks. Standard precautions apply."
+                "No strong risk signal was found in the submitted details. This does not "
+                "verify that the network is safe; standard public Wi-Fi precautions still apply."
             ),
         }
         return {
             "threat_explanation": threat_map.get(risk_level, threat_map["MEDIUM"]),
             "immediate_actions": [
-                "Enable VPN before browsing",
-                "Avoid banking and financial transactions",
+                "Use mobile data for banking and other sensitive activities",
+                "A trusted VPN may add a layer of protection on Wi-Fi, but does not guarantee security",
                 "Verify HTTPS on all websites",
                 "Disable file sharing and Bluetooth",
             ],

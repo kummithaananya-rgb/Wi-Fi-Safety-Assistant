@@ -28,7 +28,6 @@
 
   --ibm-blue: #0f62fe;
   --groq-green: #00c853;
-  --gemini-purple: #9c27b0;
 
   --radius: 10px;
   --radius-lg: 14px;
@@ -147,7 +146,6 @@ a:hover { text-decoration: underline; }
 }
 .ibm-logo { background: rgba(15,98,254,0.15); color: #60a5fa; font-size: 12px; letter-spacing: 0; }
 .groq-logo { background: rgba(0,200,83,0.1); color: var(--groq-green); font-size: 20px; }
-.gemini-logo { background: rgba(156,39,176,0.1); color: #ce93d8; font-size: 20px; }
 .model-info { flex: 1; }
 .model-name { font-weight: 600; font-size: 14px; }
 .model-sub { color: var(--text-muted); font-size: 11px; margin-top: 2px; }

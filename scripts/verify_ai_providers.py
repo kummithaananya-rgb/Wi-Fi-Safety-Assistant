@@ -1,4 +1,4 @@
-"""Opt-in live connectivity and fallback check for IBM Granite and Gemini."""
+"""Opt-in live connectivity and safe-failure check for IBM Granite."""
 
 import json
 import logging
@@ -145,10 +145,7 @@ def main():
     from services.ai_model_manager import AIModelManager
     from services.provider_errors import classify_provider_error
 
-    credentials_present = {
-        "granite": Config.has_granite(),
-        "gemini": Config.has_gemini(),
-    }
+    credentials_present = {"granite": Config.has_granite()}
     try:
         manager = AIModelManager(Config)
     except Exception as exc:
@@ -160,35 +157,14 @@ def main():
         print(json.dumps(report, indent=2))
         return 1
 
-    provider_results = [
-        _run_provider(manager.granite, "granite", PROMPT),
-        _run_provider(manager.gemini, "gemini", PROMPT),
-    ]
-
-    fallback_manager = AIModelManager.__new__(AIModelManager)
-    fallback_manager.granite = _ForcedFailureProvider("granite")
-    fallback_manager.gemini = manager.gemini
-    fallback_started = time.monotonic()
-    fallback_result = fallback_manager.generate(
-        PROMPT, provider="auto", max_tokens=32, temperature=0
-    )
-    fallback_summary = _result_summary(
-        fallback_result.get("provider", "none"),
-        fallback_result,
-        (time.monotonic() - fallback_started) * 1000,
-    )
-    fallback_summary.update({
-        "granite_failure_mode": "simulated_for_router_check",
-        "fallback_status": fallback_result.get("provider_status", "failed"),
-    })
+    granite_result = _run_provider(manager.granite, "granite", PROMPT)
 
     failure_manager = AIModelManager.__new__(AIModelManager)
     failure_manager.granite = _ForcedFailureProvider("granite")
-    failure_manager.gemini = _ForcedFailureProvider("gemini")
     failure_result = failure_manager.generate(
         PROMPT, provider="auto", max_tokens=32, temperature=0
     )
-    both_failure_safe = (
+    granite_failure_safe = (
         not failure_result.get("success")
         and failure_result.get("text") == ""
         and failure_result.get("provider") == "none"
@@ -199,10 +175,9 @@ def main():
     report = {
         "live_tests": "completed",
         "credentials_present": credentials_present,
-        "provider_checks": provider_results,
-        "fallback_route": fallback_summary,
-        "both_provider_failure_simulation": {
-            "safe_failure_result": both_failure_safe,
+        "provider_check": granite_result,
+        "granite_failure_simulation": {
+            "safe_failure_result": granite_failure_safe,
             "provider": failure_result.get("provider", "unknown"),
             "provider_status": failure_result.get("provider_status", "unknown"),
         },
@@ -216,7 +191,6 @@ def main():
     secret_values = (
         Config.IBM_CLOUD_API_KEY,
         Config.IBM_WATSONX_PROJECT_ID,
-        Config.GOOGLE_GEMINI_API_KEY,
     )
     if any(secret and secret in rendered for secret in secret_values):
         print(json.dumps({
@@ -225,18 +199,10 @@ def main():
         }))
         return 1
 
-    all_providers_succeeded = all(
-        result["success"] for result in provider_results
-    )
-    fallback_succeeded = (
-        fallback_summary["success"]
-        and fallback_summary["provider"] == "gemini"
-        and fallback_summary["fallback_status"] == "fallback_success"
-    )
     print(rendered)
     if not all(credentials_present.values()):
         return 2
-    return 0 if all_providers_succeeded and fallback_succeeded and both_failure_safe else 1
+    return 0 if granite_result["success"] and granite_failure_safe else 1
 
 
 if __name__ == "__main__":
