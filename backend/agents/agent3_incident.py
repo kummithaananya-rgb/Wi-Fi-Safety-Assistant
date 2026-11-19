@@ -2,7 +2,7 @@
 Agent 3: Incident Response & Safety Guidance Agent
 Receives aggregated findings from Agents 1 & 2.
 Provides incident response, phishing awareness, and generates final safety report.
-Uses Groq (fast inference) with Gemini as backup; Granite for final report.
+Uses IBM Granite through the provider manager, with Google Gemini as fallback.
 """
 import re
 import json
@@ -102,8 +102,7 @@ class IncidentResponseAgent:
     """
 
     AGENT_NAME = "Agent 3: Incident Response & Safety Guidance"
-    PRIMARY_PROVIDER = "groq"      # Fast inference for incident response
-    BACKUP_PROVIDER = "gemini"     # Backup if Groq unavailable
+    PRIMARY_PROVIDER = "auto"
 
     SYSTEM_PROMPT = """You are an incident response specialist for cybersecurity in India.
 You have received a complete risk assessment and device safety analysis.
@@ -182,7 +181,6 @@ Identified Scenario: {scenario}
 Provide a comprehensive incident response and final safety report as JSON.
 Return ONLY valid JSON, no markdown fences."""
 
-        # Try primary (Groq) then backup (Gemini)
         result = self.ai.generate(
             prompt=prompt,
             provider=self.PRIMARY_PROVIDER,
@@ -190,12 +188,9 @@ Return ONLY valid JSON, no markdown fences."""
             temperature=0.2,
         )
         if not result["success"]:
-            logger.warning(f"[{self.AGENT_NAME}] Primary provider failed, trying backup")
-            result = self.ai.generate(
-                prompt=prompt,
-                provider=self.BACKUP_PROVIDER,
-                max_tokens=900,
-                temperature=0.2,
+            logger.warning(
+                "[%s] All configured providers failed; using static incident guidance",
+                self.AGENT_NAME,
             )
 
         agent_output: Dict[str, Any] = {
@@ -204,6 +199,9 @@ Return ONLY valid JSON, no markdown fences."""
             "status": "complete" if result["success"] else "complete_with_fallback",
             "model_used": result.get("model", "unknown"),
             "provider": result.get("provider", "unknown"),
+            "provider_status": result.get("provider_status", "unknown"),
+            "provider_attempts": result.get("provider_attempts", []),
+            "fallback_reason": result.get("fallback_reason"),
             "duration_ms": result.get("duration_ms", 0),
             "risk_level_received": risk_level,
             "identified_scenario": scenario,

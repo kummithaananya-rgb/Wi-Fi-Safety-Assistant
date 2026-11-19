@@ -6,6 +6,8 @@ import time
 import logging
 from typing import Dict, Any
 
+from services.provider_errors import classify_provider_error
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -19,6 +21,8 @@ except ImportError:
 
 class GeminiService:
     """Wrapper around Google Gemini API (google-genai SDK)."""
+
+    REQUEST_TIMEOUT_MS = 30_000
 
     def __init__(self, api_key: str, model_id: str):
         self.api_key = api_key
@@ -37,12 +41,15 @@ class GeminiService:
         try:
             self._client = genai.Client(
                 api_key=self.api_key,
-                http_options=genai_types.HttpOptions(timeout=30000),  # 30s timeout
+                http_options=genai_types.HttpOptions(
+                    timeout=self.REQUEST_TIMEOUT_MS
+                ),
             )
             self._available = True
             logger.info(f"Google Gemini initialized: {self.model_id}")
-        except Exception as e:
-            logger.error(f"Gemini init failed: {e}")
+        except Exception as exc:
+            error_code = classify_provider_error(exc)
+            logger.error("Gemini initialization failed (%s)", error_code)
             self._available = False
 
     @property
@@ -56,18 +63,9 @@ class GeminiService:
         temperature: float = 0.3,
     ) -> Dict[str, Any]:
         if not self._available:
-            return {
-                "success": False,
-                "text": "",
-                "model": self.model_id,
-                "provider": "gemini",
-                "duration_ms": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "error": "Gemini not available – check API key",
-            }
+            return self._failure("not_configured")
 
-        t0 = time.time()
+        t0 = time.monotonic()
         try:
             gen_config = genai_types.GenerateContentConfig(
                 max_output_tokens=max_tokens,
@@ -78,7 +76,7 @@ class GeminiService:
                 contents=prompt,
                 config=gen_config,
             )
-            duration_ms = round((time.time() - t0) * 1000, 1)
+            duration_ms = round((time.monotonic() - t0) * 1000, 1)
             # response.text can be None for some models; fall back to candidates
             text = response.text
             if text is None:
@@ -89,6 +87,11 @@ class GeminiService:
                     )
                 except (IndexError, AttributeError, TypeError):
                     text = ""
+            if not isinstance(text, str) or not text.strip():
+                return self._failure(
+                    "invalid_response",
+                    round((time.monotonic() - t0) * 1000, 1),
+                )
             usage = getattr(response, "usage_metadata", None)
             logger.debug(f"Gemini OK in {duration_ms}ms")
             return {
@@ -101,29 +104,30 @@ class GeminiService:
                 "completion_tokens": getattr(usage, "candidates_token_count", 0) or 0,
                 "error": None,
             }
-        except Exception as e:
-            duration_ms = round((time.time() - t0) * 1000, 1)
-            logger.error(f"Gemini generate error: {e}")
-            return {
-                "success": False,
-                "text": "",
-                "model": self.model_id,
-                "provider": "gemini",
-                "duration_ms": duration_ms,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "error": str(e),
-            }
+        except Exception as exc:
+            duration_ms = round((time.monotonic() - t0) * 1000, 1)
+            error_code = classify_provider_error(exc)
+            logger.warning("Gemini request failed (%s)", error_code)
+            return self._failure(error_code, duration_ms)
+
+    def _failure(self, error: str, duration_ms: float = 0) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "text": "",
+            "model": self.model_id,
+            "provider": "gemini",
+            "duration_ms": duration_ms,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "error": error,
+        }
 
     def test_connection(self) -> Dict[str, Any]:
-        # Use a conversational prompt; pure-instruction prompts can yield empty responses
+        """Check connectivity with a prompt that must produce non-empty text."""
         result = self.generate(
             "Say the words 'Google Gemini operational' and nothing else.",
             max_tokens=20,
             temperature=0.1,
         )
         result["test"] = True
-        # API connected successfully even if text is empty (model-dependent blank response)
-        if result["success"] and not result.get("text"):
-            result["note"] = "API connected; model returned empty content on test prompt"
         return result

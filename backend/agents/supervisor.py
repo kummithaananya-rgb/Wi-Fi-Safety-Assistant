@@ -5,11 +5,40 @@ resolves conflicting recommendations, and returns one unified response.
 """
 import time
 import logging
-import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
+from agents.agent2_device import BANKING_GUIDANCE, DEVICE_CHECKLIST_BY_RISK
+
 logger = logging.getLogger(__name__)
+
+AGENT2_OUTPUT_SCHEMA = {
+    "threat_explanation": str,
+    "immediate_actions": list,
+    "browsing_tips": list,
+    "app_security": list,
+    "bengaluru_specific": str,
+    "recovery_note": str,
+}
+
+AGENT3_OUTPUT_SCHEMA = {
+    "incident_scenario": str,
+    "severity": str,
+    "situation_summary": str,
+    "immediate_steps": list,
+    "if_credentials_entered": str,
+    "reporting_guidance": str,
+    "prevention_summary": str,
+    "bengaluru_transit_tip": str,
+}
+
+AGENT3_ALLOWED_VALUES = {
+    "incident_scenario": {
+        "phishing", "account_compromise", "fake_portal",
+        "suspicious_network", "general",
+    },
+    "severity": {"CRITICAL", "HIGH", "MEDIUM", "LOW"},
+}
 
 
 class SupervisorOrchestrator:
@@ -20,7 +49,7 @@ class SupervisorOrchestrator:
     1. Validate and understand the user request
     2. Assign task to Agent 1 (Risk Assessment) → IBM Granite
     3. Pass Agent 1 output to Agent 2 (Device Safety) → IBM Granite
-    4. Pass Agents 1+2 output to Agent 3 (Incident Response) → Groq/Gemini
+    4. Pass Agents 1+2 output to Agent 3 (Incident Response) → Granite/Gemini
     5. Consolidate all outputs into one unified response
     6. Log metrics and persist to database
     """
@@ -80,6 +109,11 @@ class SupervisorOrchestrator:
             if not guard_result["allowed"]:
                 log_step("Guardrail Check", "blocked", guard_result["reason"])
                 return self._blocked_response(guard_result, execution_log)
+            sanitized = guard_result["sanitized"]
+            wifi_name = sanitized["wifi_name"]
+            connection_type = sanitized["connection_type"]
+            location = sanitized["location"]
+            user_context = sanitized["user_context"]
             log_step("Guardrail Check", "passed",
                      f"flags={guard_result.get('flags', [])}")
 
@@ -116,10 +150,37 @@ class SupervisorOrchestrator:
             # ── Step 3: Agent 2 – Device Safety ───────────────────────────
             log_step("Agent 2: Device Safety & Prevention", "running")
             t2 = time.time()
-            agent2_output = self.agent2.analyze(
-                agent1_output=agent1_output,
-                task_id=task_id,
+            try:
+                agent2_output = self.agent2.analyze(
+                    agent1_output=agent1_output,
+                    task_id=task_id,
+                )
+            except (TypeError, ValueError):
+                logger.warning("Agent 2: malformed output; using static guidance")
+                agent2_output = {}
+            if not isinstance(agent2_output, dict):
+                agent2_output = {}
+            if not self._validate_output_fields(
+                agent2_output,
+                AGENT2_OUTPUT_SCHEMA,
+                agent1_output.get("risk_level", "UNKNOWN"),
+            ):
+                logger.warning("Agent 2: unsafe output rejected; using static guidance")
+                agent2_output.update(self.agent2._fallback_guidance(
+                    agent1_output.get("risk_level", "MEDIUM"),
+                    agent1_output.get("input", {}).get("wifi_name", "unknown"),
+                    agent1_output.get("input", {}).get("location", "unknown"),
+                ))
+                agent2_output["status"] = "complete_with_fallback"
+            risk_level = agent1_output.get("risk_level", "MEDIUM")
+            agent2_output["device_checklist"] = DEVICE_CHECKLIST_BY_RISK.get(
+                risk_level, DEVICE_CHECKLIST_BY_RISK["MEDIUM"]
             )
+            agent2_output["banking_guidance"] = BANKING_GUIDANCE.get(
+                risk_level, BANKING_GUIDANCE["MEDIUM"]
+            )
+            agent2_output["agent"] = self.agent2.AGENT_NAME
+            agent2_output["task_id"] = task_id
             agent2_ms = round((time.time() - t2) * 1000, 1)
             self.db.update_task(task_id,
                                 agent2_output=agent2_output,
@@ -132,11 +193,48 @@ class SupervisorOrchestrator:
             # ── Step 4: Agent 3 – Incident Response ───────────────────────
             log_step("Agent 3: Incident Response & Safety Guidance", "running")
             t3 = time.time()
-            agent3_output = self.agent3.respond(
-                agent1_output=agent1_output,
-                agent2_output=agent2_output,
-                task_id=task_id,
-            )
+            try:
+                agent3_output = self.agent3.respond(
+                    agent1_output=agent1_output,
+                    agent2_output=agent2_output,
+                    task_id=task_id,
+                )
+            except (TypeError, ValueError):
+                logger.warning("Agent 3: malformed output; using static incident guidance")
+                agent3_output = {}
+            if not isinstance(agent3_output, dict):
+                agent3_output = {}
+            if not self._validate_output_fields(
+                agent3_output,
+                AGENT3_OUTPUT_SCHEMA,
+                agent1_output.get("risk_level", "UNKNOWN"),
+                allowed_values=AGENT3_ALLOWED_VALUES,
+            ):
+                logger.warning(
+                    "Agent 3: unsafe output rejected; using static incident guidance"
+                )
+                scenario = agent3_output.get("identified_scenario", "general")
+                if (
+                    not isinstance(scenario, str)
+                    or scenario not in AGENT3_ALLOWED_VALUES["incident_scenario"]
+                ):
+                    scenario = "general"
+                risk_level = agent1_output.get("risk_level", "MEDIUM")
+                agent3_output.update(self.agent3._fallback_response(
+                    scenario,
+                    risk_level,
+                    agent1_output.get("input", {}).get("wifi_name", "unknown"),
+                    agent1_output.get("input", {}).get("location", "unknown"),
+                ))
+                agent3_output["status"] = "complete_with_fallback"
+                agent3_output["final_report"] = self.agent3._generate_final_report(
+                    agent1_output,
+                    agent2_output,
+                    agent3_output,
+                    task_id,
+                )
+            agent3_output["agent"] = self.agent3.AGENT_NAME
+            agent3_output["task_id"] = task_id
             agent3_ms = round((time.time() - t3) * 1000, 1)
             self.db.update_task(task_id,
                                 agent3_output=agent3_output,
@@ -178,11 +276,54 @@ class SupervisorOrchestrator:
             logger.exception(f"[Supervisor] Pipeline error: {e}")
             if task_id:
                 self.db.update_task(task_id, status="error",
-                                    error_message=str(e))
-            log_step("Pipeline", "error", str(e))
-            return self._error_response(str(e), task_id, execution_log)
+                                    error_message="Pipeline processing failed")
+            log_step("Pipeline", "error", "Pipeline processing failed")
+            return self._error_response(task_id, execution_log)
 
     # ── Private helpers ────────────────────────────────────────────────────
+
+    def _validate_output_fields(
+        self,
+        output: Any,
+        schema: Dict[str, type],
+        risk_level: str,
+        allowed_values: Optional[Dict[str, set]] = None,
+    ) -> bool:
+        if not isinstance(output, dict):
+            return False
+
+        for field, expected_type in schema.items():
+            if field not in output:
+                return False
+
+            value = output[field]
+            if expected_type is str:
+                if not isinstance(value, str):
+                    return False
+                if allowed_values and field in allowed_values:
+                    value = value.strip().upper() if field == "severity" else value.strip().lower()
+                    if value not in allowed_values[field]:
+                        return False
+                    output[field] = value
+                validation = self.guardrails.validate_output(value, risk_level)
+                if not validation["valid"]:
+                    return False
+                output[field] = validation["sanitized_text"]
+            elif expected_type is list:
+                if not isinstance(value, list) or not all(
+                    isinstance(item, str) for item in value
+                ):
+                    return False
+                sanitized_items = []
+                for item in value:
+                    validation = self.guardrails.validate_output(item, risk_level)
+                    if not validation["valid"]:
+                        return False
+                    sanitized_items.append(validation["sanitized_text"])
+                output[field] = sanitized_items
+            elif not isinstance(value, expected_type):
+                return False
+        return True
 
     def _consolidate(
         self,
@@ -192,22 +333,28 @@ class SupervisorOrchestrator:
         """Merge outputs from all three agents into one clean response."""
         risk = a1.get("risk_level", "UNKNOWN")
         checklist = a2.get("device_checklist", [])
-        final_report = a3.get("final_report", {})
+        final_report = dict(a3.get("final_report", {}))
 
-        # Resolve any conflicting recommendations (supervisor decision)
-        # Rule: highest risk level wins if agents disagree
-        agent3_severity = a3.get("severity", risk)
         severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
-        # Keep the higher severity
-        final_risk = risk  # already established by Agent 1
+        incident_severity = a3.get("severity", risk)
+        if severity_rank.get(incident_severity, 0) < severity_rank.get(risk, 0):
+            incident_severity = risk
+
+        disclaimer = self.guardrails.output_validator.REQUIRED_DISCLAIMER
+        risk_explanation = a1.get("explanation", "")
+        if disclaimer not in risk_explanation:
+            risk_explanation = f"{risk_explanation}\n\n{disclaimer}".strip()
+        final_report["risk_level"] = risk
+        final_report["disclaimer"] = disclaimer
 
         return {
             "success": True,
             "task_id": task_id,
-            "risk_level": final_risk,
+            "risk_level": risk,
             "risk_score": a1.get("risk_score", 0),
             "risk_summary": a1.get("summary", ""),
-            "risk_explanation": a1.get("explanation", ""),
+            "risk_explanation": risk_explanation,
+            "disclaimer": disclaimer,
             "warning_signs": a1.get("warning_signs", []),
             "risk_factors": a1.get("risk_factors", []),
             "positive_indicators": a1.get("positive_indicators", []),
@@ -224,7 +371,7 @@ class SupervisorOrchestrator:
 
             "incident_scenario": a3.get("incident_scenario",
                                         a3.get("identified_scenario", "general")),
-            "incident_severity": a3.get("severity", risk),
+            "incident_severity": incident_severity,
             "situation_summary": a3.get("situation_summary", ""),
             "incident_immediate_steps": a3.get("immediate_steps",
                                                a3.get("immediate_response_steps", [])),
@@ -242,6 +389,7 @@ class SupervisorOrchestrator:
                     "status": a1.get("status", "complete"),
                     "model": a1.get("model_used", ""),
                     "provider": a1.get("provider", ""),
+                    "provider_status": a1.get("provider_status", "unknown"),
                     "duration_ms": a1.get("duration_ms", 0),
                 },
                 "agent2": {
@@ -249,6 +397,7 @@ class SupervisorOrchestrator:
                     "status": a2.get("status", "complete"),
                     "model": a2.get("model_used", ""),
                     "provider": a2.get("provider", ""),
+                    "provider_status": a2.get("provider_status", "unknown"),
                     "duration_ms": a2.get("duration_ms", 0),
                 },
                 "agent3": {
@@ -256,6 +405,7 @@ class SupervisorOrchestrator:
                     "status": a3.get("status", "complete"),
                     "model": a3.get("model_used", ""),
                     "provider": a3.get("provider", ""),
+                    "provider_status": a3.get("provider_status", "unknown"),
                     "duration_ms": a3.get("duration_ms", 0),
                 },
             },
@@ -282,15 +432,16 @@ class SupervisorOrchestrator:
             "success": False,
             "blocked": True,
             "reason": guard_result.get("reason", "Request blocked by guardrails"),
+            "flags": guard_result.get("flags", []),
             "risk_level": "UNKNOWN",
             "execution_log": execution_log,
         }
 
-    def _error_response(self, error: str, task_id: Optional[str],
+    def _error_response(self, task_id: Optional[str],
                         execution_log: list) -> Dict[str, Any]:
         return {
             "success": False,
-            "error": error,
+            "error": "Assessment could not be completed. Please try again.",
             "task_id": task_id,
             "risk_level": "UNKNOWN",
             "execution_log": execution_log,

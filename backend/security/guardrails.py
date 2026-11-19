@@ -7,6 +7,7 @@ import re
 import time
 import html
 import logging
+import threading
 from typing import Dict, Any, List, Tuple
 from collections import defaultdict
 
@@ -97,21 +98,23 @@ class RateLimiter:
     def __init__(self, max_requests_per_minute: int = 30):
         self.max_rpm = max_requests_per_minute
         self._requests: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
 
     def is_allowed(self, client_id: str) -> Tuple[bool, int]:
         """
         Returns (allowed, requests_remaining).
         """
-        now = time.time()
-        window = 60.0  # 1 minute
-        self._requests[client_id] = [
-            t for t in self._requests[client_id] if now - t < window
-        ]
-        count = len(self._requests[client_id])
-        if count >= self.max_rpm:
-            return False, 0
-        self._requests[client_id].append(now)
-        return True, self.max_rpm - count - 1
+        with self._lock:
+            now = time.time()
+            window = 60.0  # 1 minute
+            self._requests[client_id] = [
+                t for t in self._requests[client_id] if now - t < window
+            ]
+            count = len(self._requests[client_id])
+            if count >= self.max_rpm:
+                return False, 0
+            self._requests[client_id].append(now)
+            return True, self.max_rpm - count - 1
 
 
 class OutputValidator:
@@ -139,16 +142,21 @@ class OutputValidator:
         Returns {valid, issues, sanitized_text}
         """
         issues = []
-        sanitized = text
+        sanitized = text if isinstance(text, str) else ""
+        if not isinstance(text, str):
+            issues.append("Model output is not text")
 
         # Check for hallucination triggers
         for pat in self.HALLUCINATION_TRIGGERS:
-            if pat.search(text):
+            if pat.search(sanitized):
                 issues.append(f"Hallucination trigger detected: {pat.pattern[:40]}")
 
         # Strip any leaked PII from outputs
         for name, pat in PII_PATTERNS.items():
-            if name in ("phone_number", "aadhaar", "credit_card", "password_hint"):
+            if name in (
+                "phone_number", "aadhaar", "pan_card", "credit_card",
+                "password_hint", "email_in_context", "ifsc_code",
+            ):
                 sanitized = pat.sub(f"[{name.upper()} REDACTED]", sanitized)
 
         return {
@@ -164,8 +172,16 @@ class Guardrails:
     Validates inputs before passing to agents.
     """
 
-    def __init__(self, max_requests_per_minute: int = 30, enable: bool = True):
+    def __init__(
+        self,
+        max_requests_per_minute: int = 30,
+        enable: bool = True,
+        max_input_length: int = 2000,
+    ):
+        if max_input_length < 1:
+            raise ValueError("max_input_length must be greater than zero")
         self.enabled = enable
+        self.max_input_length = max_input_length
         self.rate_limiter = RateLimiter(max_requests_per_minute)
         self.output_validator = OutputValidator()
         logger.info(f"Guardrails initialized (enabled={enable})")
@@ -182,102 +198,141 @@ class Guardrails:
         Full input validation pipeline.
         Returns {allowed, reason, flags, sanitized_inputs}
         """
-        if not self.enabled:
-            return {
-                "allowed": True,
-                "reason": "Guardrails disabled",
-                "flags": [],
-                "sanitized": {
-                    "wifi_name": wifi_name,
-                    "connection_type": connection_type,
-                    "location": location,
-                    "user_context": user_context,
-                },
-            }
+        inputs = {
+            "wifi_name": str(wifi_name or ""),
+            "connection_type": str(connection_type or ""),
+            "location": str(location or ""),
+            "user_context": str(user_context or ""),
+        }
+        return self._validate_inputs(
+            inputs=inputs,
+            client_id=client_ip,
+            required_field="wifi_name",
+            field_limits=MAX_FIELD_LENGTHS,
+        )
 
+    def validate_chat_input(
+        self,
+        message: str,
+        client_id: str = "unknown",
+    ) -> Dict[str, Any]:
+        """Validate a chat message with the same limits and protections as assessments."""
+        inputs = {
+            "wifi_name": "",
+            "connection_type": "",
+            "location": "",
+            "user_context": str(message or ""),
+        }
+        field_limits = dict(MAX_FIELD_LENGTHS)
+        field_limits["user_context"] = self.max_input_length
+        return self._validate_inputs(
+            inputs=inputs,
+            client_id=client_id,
+            required_field="user_context",
+            field_limits=field_limits,
+            required_message="A message is required",
+        )
+
+    def _validate_inputs(
+        self,
+        inputs: Dict[str, str],
+        client_id: str,
+        required_field: str,
+        field_limits: Dict[str, int],
+        required_message: str = "Wi-Fi network name is required",
+    ) -> Dict[str, Any]:
         flags: List[str] = []
-
-        # 1. Rate limiting
-        allowed, remaining = self.rate_limiter.is_allowed(client_ip)
-        if not allowed:
+        input_length = sum(len(value) for value in inputs.values())
+        if input_length > self.max_input_length:
             return {
                 "allowed": False,
-                "reason": "Rate limit exceeded. Please wait before trying again.",
-                "flags": ["rate_limit"],
+                "reason": (
+                    "Input exceeds the maximum permitted length of "
+                    f"{self.max_input_length} characters."
+                ),
+                "flags": ["input_too_long"],
             }
 
-        # 2. Required field check
-        if not wifi_name or not wifi_name.strip():
+        if not inputs[required_field].strip():
             return {
                 "allowed": False,
-                "reason": "Wi-Fi network name is required",
+                "reason": required_message,
                 "flags": ["missing_required_field"],
             }
 
-        # 3. Field length validation
-        inputs = {
-            "wifi_name": wifi_name or "",
-            "connection_type": connection_type or "",
-            "location": location or "",
-            "user_context": user_context or "",
-        }
-        for field, max_len in MAX_FIELD_LENGTHS.items():
+        remaining = None
+        if self.enabled:
+            allowed, remaining = self.rate_limiter.is_allowed(client_id)
+            if not allowed:
+                return {
+                    "allowed": False,
+                    "reason": "Rate limit exceeded. Please wait before trying again.",
+                    "flags": ["rate_limit"],
+                }
+
+        # Inspect the full submitted text before field-level truncation or HTML escaping.
+        full_text = " ".join(inputs.values())
+        if self.enabled:
+            for pat in INJECTION_PATTERNS:
+                if pat.search(html.unescape(full_text)):
+                    logger.warning(
+                        "Prompt injection attempt from %s: %s",
+                        client_id,
+                        pat.pattern[:50],
+                    )
+                    return {
+                        "allowed": False,
+                        "reason": (
+                            "Invalid input detected. Please describe your Wi-Fi "
+                            "connection normally."
+                        ),
+                        "flags": ["prompt_injection"],
+                    }
+
+            for pat in DANGEROUS_PATTERNS:
+                if pat.search(full_text):
+                    logger.warning(
+                        "Dangerous request from %s: %s",
+                        client_id,
+                        pat.pattern[:50],
+                    )
+                    return {
+                        "allowed": False,
+                        "reason": (
+                            "This application does not perform network scanning or "
+                            "testing. Please describe your Wi-Fi connection details "
+                            "for a safety assessment."
+                        ),
+                        "flags": ["dangerous_request"],
+                    }
+
+        for field, max_len in field_limits.items():
             if len(inputs[field]) > max_len:
                 inputs[field] = inputs[field][:max_len]
                 flags.append(f"field_truncated:{field}")
 
-        # 4. Sanitize (strip HTML entities)
-        sanitized = {k: html.escape(v.strip()) for k, v in inputs.items()}
-
-        # 5. Prompt injection detection
-        full_text = " ".join(sanitized.values())
-        for pat in INJECTION_PATTERNS:
-            if pat.search(full_text):
-                logger.warning(f"Prompt injection attempt from {client_ip}: {pat.pattern[:50]}")
-                return {
-                    "allowed": False,
-                    "reason": "Invalid input detected. Please describe your Wi-Fi connection normally.",
-                    "flags": ["prompt_injection"],
-                }
-
-        # 6. Dangerous request detection
-        for pat in DANGEROUS_PATTERNS:
-            if pat.search(full_text):
-                logger.warning(f"Dangerous request from {client_ip}: {pat.pattern[:50]}")
-                return {
-                    "allowed": False,
-                    "reason": (
-                        "This application does not perform network scanning or testing. "
-                        "Please describe your Wi-Fi connection details for a safety assessment."
-                    ),
-                    "flags": ["dangerous_request"],
-                }
-
-        # 7. PII detection (flag but allow, with PII stripped)
+        sanitized = {key: html.escape(value.strip()) for key, value in inputs.items()}
         pii_found = []
         for name, pat in PII_PATTERNS.items():
-            # Only block passwords; flag others
-            if name == "password_hint":
-                if pat.search(sanitized.get("user_context", "")):
+            if name == "bank_account":
+                continue
+            for field, value in sanitized.items():
+                if pat.search(value):
                     pii_found.append(name)
-                    sanitized["user_context"] = pat.sub("[PASSWORD REDACTED]",
-                                                        sanitized["user_context"])
-                    flags.append(f"pii_redacted:{name}")
-            elif name in ("aadhaar", "credit_card", "pan_card"):
-                if pat.search(full_text):
-                    pii_found.append(name)
-                    flags.append(f"pii_detected:{name}")
-                    # Redact from context
-                    sanitized["user_context"] = pat.sub(
-                        f"[{name.upper()} REDACTED]", sanitized["user_context"]
+                    replacement = (
+                        "[PASSWORD REDACTED]"
+                        if name == "password_hint"
+                        else f"[{name.upper()} REDACTED]"
                     )
+                    sanitized[field] = pat.sub(replacement, value)
+                    flags.append(f"pii_redacted:{name}")
 
-        if "aadhaar" in pii_found or "credit_card" in pii_found:
-            logger.warning(f"PII detected from {client_ip}: {pii_found}")
+        if pii_found:
+            logger.warning("PII detected from %s: %s", client_id, sorted(set(pii_found)))
 
         return {
             "allowed": True,
-            "reason": "Input validated",
+            "reason": "Input validated" if self.enabled else "Guardrails disabled",
             "flags": flags,
             "sanitized": sanitized,
             "rate_limit_remaining": remaining,

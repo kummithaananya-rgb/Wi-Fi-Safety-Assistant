@@ -40,6 +40,7 @@ ai_manager = AIModelManager(Config)
 guardrails = Guardrails(
     max_requests_per_minute=Config.RATE_LIMIT_PER_MINUTE,
     enable=Config.ENABLE_GUARDRAILS,
+    max_input_length=Config.MAX_INPUT_LENGTH,
 )
 
 agent1 = NetworkRiskAgent(ai_manager)
@@ -104,7 +105,7 @@ def assess():
     }
     """
     data = request.get_json(silent=True) or {}
-    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    client_ip = request.remote_addr or "unknown"
 
     wifi_name = str(data.get("wifi_name", "")).strip()
     connection_type = str(data.get("connection_type", "unknown")).strip()
@@ -122,13 +123,18 @@ def assess():
             user_context=user_context,
             client_ip=client_ip,
         )
+        flags = result.get("flags", [])
         status_code = 200 if result.get("success") else (
-            429 if result.get("reason", "").startswith("Rate") else 400
+            429 if "rate_limit" in flags else
+            413 if "input_too_long" in flags else 400
         )
         return jsonify(result), status_code
     except Exception as e:
         logger.exception(f"Assess endpoint error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "error": "Assessment could not be completed. Please try again.",
+        }), 500
 
 
 @app.route("/api/models/status", methods=["GET"])
@@ -163,9 +169,15 @@ def test_models():
         return jsonify({"success": False, "error": "Unknown provider"}), 400
 
     any_success = any(r.get("success") for r in results.values())
+    safe_results = {}
+    for provider_name, provider_result in results.items():
+        safe_result = dict(provider_result)
+        if not safe_result.get("success") and safe_result.get("error"):
+            safe_result["error"] = "Provider test failed. Check server logs for details."
+        safe_results[provider_name] = safe_result
     return jsonify({
         "success": any_success,
-        "results": results,
+        "results": safe_results,
     })
 
 
@@ -206,21 +218,19 @@ def chat():
     """
     data = request.get_json(silent=True) or {}
     message = str(data.get("message", "")).strip()
-    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    client_ip = request.remote_addr or "unknown"
 
     if not message:
         return jsonify({"success": False, "error": "message is required"}), 400
 
-    # Guardrail check
-    guard = guardrails.validate_input(
-        wifi_name=message[:100],
-        connection_type="",
-        location="",
-        user_context="",
-        client_ip=client_ip,
-    )
+    guard = guardrails.validate_chat_input(message, client_id=client_ip)
     if not guard["allowed"]:
-        return jsonify({"success": False, "error": guard["reason"]}), 400
+        status_code = (
+            429 if "rate_limit" in guard.get("flags", []) else
+            413 if "input_too_long" in guard.get("flags", []) else 400
+        )
+        return jsonify({"success": False, "error": guard["reason"]}), status_code
+    message = guard["sanitized"]["user_context"]
 
     system_ctx = """You are a friendly cybersecurity expert helping Bengaluru commuters 
 stay safe on public Wi-Fi. Answer questions about Wi-Fi safety, cybersecurity, 
@@ -236,12 +246,24 @@ Reference CERT-In (cert-in.org.in) and report cyber crimes at cybercrime.gov.in 
         temperature=0.4,
     )
 
+    output = guardrails.validate_output(result.get("text", ""), "UNKNOWN")
+    if not result.get("success") or not output["valid"]:
+        if result.get("success") and not output["valid"]:
+            logger.warning("Chat: unsafe model output rejected")
+        return jsonify({
+            "success": False,
+            "response": (
+                "I can't safely generate a response right now. "
+                "Please try again or consult the official cybersecurity resources."
+            ),
+            "error": "AI response unavailable or failed safety validation.",
+        }), 503 if not result.get("success") else 200
+
     return jsonify({
-        "success": result["success"],
-        "response": result["text"],
+        "success": True,
+        "response": output["sanitized_text"],
         "model": result.get("model", ""),
         "provider": result.get("provider", ""),
-        "error": result.get("error"),
     })
 
 

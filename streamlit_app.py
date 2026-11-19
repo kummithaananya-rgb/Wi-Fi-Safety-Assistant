@@ -7,6 +7,8 @@ No Flask server needed; backend modules are imported and called in-process.
 """
 import sys
 import os
+import html
+import uuid
 
 # Put backend/ on the path so all backend imports resolve
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
@@ -52,6 +54,7 @@ def _bootstrap():
     guardrails = Guardrails(
         max_requests_per_minute=Config.RATE_LIMIT_PER_MINUTE,
         enable=Config.ENABLE_GUARDRAILS,
+        max_input_length=Config.MAX_INPUT_LENGTH,
     )
     agent1 = NetworkRiskAgent(ai_manager)
     agent2 = DeviceSafetyAgent(ai_manager)
@@ -66,6 +69,21 @@ def _bootstrap():
 
 
 ai_manager, db, supervisor = _bootstrap()
+
+
+def _streamlit_client_id():
+    """Return a random, session-scoped rate-limit key without exposing identity."""
+    if "rate_limit_id" not in st.session_state:
+        st.session_state["rate_limit_id"] = f"streamlit-{uuid.uuid4().hex}"
+    return st.session_state["rate_limit_id"]
+
+
+def _validate_chat_message(message):
+    return supervisor.guardrails.validate_chat_input(
+        message,
+        client_id=_streamlit_client_id(),
+    )
+
 
 # ── Custom CSS ─────────────────────────────────────────────────────────────
 st.markdown("""
@@ -143,7 +161,10 @@ RISK_COLOURS = {"LOW": "#16a34a", "MEDIUM": "#d97706", "HIGH": "#dc2626", "UNKNO
 
 def _risk_badge(level: str):
     cls = f"badge-{level}" if level in ("LOW","MEDIUM","HIGH") else "badge-UNKNOWN"
-    st.markdown(f'<span class="{cls}">{level}</span>', unsafe_allow_html=True)
+    st.markdown(
+        f'<span class="{cls}">{html.escape(str(level))}</span>',
+        unsafe_allow_html=True,
+    )
 
 def _score_bar(score: int):
     colour = RISK_COLOURS.get("HIGH" if score >= 70 else ("MEDIUM" if score >= 40 else "LOW"), "#16a34a")
@@ -158,9 +179,25 @@ def _info_card(title: str, items):
         return
     if isinstance(items, str):
         items = [items]
-    li_html = "".join(f"<li>{i}</li>" for i in items)
+    elif isinstance(items, dict):
+        items = [items]
+
+    li_html = ""
+    for item in items:
+        if isinstance(item, dict):
+            details = " · ".join(
+                str(item[key]) for key in ("priority", "category", "action")
+                if item.get(key)
+            )
+            why = str(item.get("why", ""))
+            li_html += (
+                f"<li>{html.escape(details)}"
+                f"{f'<br><small>{html.escape(why)}</small>' if why else ''}</li>"
+            )
+        else:
+            li_html += f"<li>{html.escape(str(item))}</li>"
     st.markdown(
-        f'<div class="info-card"><h4>{title}</h4><ul>{li_html}</ul></div>',
+        f'<div class="info-card"><h4>{html.escape(str(title))}</h4><ul>{li_html}</ul></div>',
         unsafe_allow_html=True,
     )
 
@@ -360,8 +397,8 @@ elif page == "🔍 Risk Assessment":
             )
             connection_type = st.selectbox(
                 "Connection Type",
-                ["open", "wpa2", "wpa3", "captive_portal", "unknown"],
-                index=0,
+                ["wpa2", "wpa3", "captive_portal", "unknown"],
+                index=3,
             )
         with col2:
             location = st.text_input(
@@ -387,12 +424,12 @@ elif page == "🔍 Risk Assessment":
                         connection_type=connection_type,
                         location=location.strip(),
                         user_context=user_context.strip(),
-                        client_ip="streamlit-user",
+                        client_ip=_streamlit_client_id(),
                     )
                     # Persist last result in session for display after rerun
                     st.session_state["last_result"] = result
                 except Exception as e:
-                    st.error(f"Analysis failed: {e}")
+                    st.error("Analysis could not be completed. Please try again.")
                     st.session_state.pop("last_result", None)
 
     # Render last result if present
@@ -424,39 +461,57 @@ elif page == "💬 AI Assistant":
     # Chat input
     user_input = st.chat_input("Ask a cybersecurity question…")
     if user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
+        chat_guard = _validate_chat_message(user_input)
+        if not chat_guard["allowed"]:
+            st.error(chat_guard["reason"])
+        else:
+            safe_message = chat_guard["sanitized"]["user_context"]
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": safe_message,
+            })
+            with st.chat_message("user"):
+                st.markdown(safe_message)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
-                system_ctx = (
-                    "You are a friendly cybersecurity expert helping Bengaluru commuters "
-                    "stay safe on public Wi-Fi. Answer questions about Wi-Fi safety, "
-                    "cybersecurity, and digital hygiene. Keep responses concise and practical. "
-                    "Reference CERT-In (cert-in.org.in) and report cyber crimes at "
-                    "cybercrime.gov.in or call 1930."
-                )
-                prompt = f"{system_ctx}\n\nUser question: {user_input}\n\nAnswer:"
-                result = ai_manager.generate(
-                    prompt=prompt,
-                    provider="auto",
-                    max_tokens=600,
-                    temperature=0.4,
-                )
-                answer = result.get("text", "Sorry, I couldn't generate a response.")
-                model  = result.get("model", "")
-                provider = result.get("provider", "")
-                st.markdown(answer)
-                if model:
-                    st.caption(f"🤖 {model} via {provider}")
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking…"):
+                    system_ctx = (
+                        "You are a friendly cybersecurity expert helping Bengaluru commuters "
+                        "stay safe on public Wi-Fi. Answer questions about Wi-Fi safety, "
+                        "cybersecurity, and digital hygiene. Keep responses concise and practical. "
+                        "Reference CERT-In (cert-in.org.in) and report cyber crimes at "
+                        "cybercrime.gov.in or call 1930."
+                    )
+                    prompt = f"{system_ctx}\n\nUser question: {safe_message}\n\nAnswer:"
+                    result = ai_manager.generate(
+                        prompt=prompt,
+                        provider="auto",
+                        max_tokens=600,
+                        temperature=0.4,
+                    )
+                    output = supervisor.guardrails.validate_output(
+                        result.get("text", ""),
+                        "UNKNOWN",
+                    )
+                    model = result.get("model", "")
+                    provider = result.get("provider", "")
+                    if not result.get("success") or not output["valid"]:
+                        answer = (
+                            "I can't safely generate a response right now. "
+                            "Please try again or consult the official cybersecurity resources."
+                        )
+                    else:
+                        answer = output["sanitized_text"]
+                    st.markdown(answer)
+                    if model:
+                        st.caption(f"🤖 {model} via {provider}")
 
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": answer,
-            "model": model,
-            "provider": provider,
-        })
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": answer,
+                "model": model,
+                "provider": provider,
+            })
 
     if st.button("🗑️ Clear Chat", use_container_width=False):
         st.session_state.chat_history = []

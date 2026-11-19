@@ -140,7 +140,7 @@ class DeviceSafetyAgent:
     """
 
     AGENT_NAME = "Agent 2: Device Safety & Prevention"
-    PRIMARY_PROVIDER = "granite"
+    PRIMARY_PROVIDER = "auto"
 
     SYSTEM_PROMPT = """You are a cybersecurity educator helping Indian commuters stay safe on public Wi-Fi.
 You have received a risk assessment from the Network Risk Assessment Agent.
@@ -220,6 +220,9 @@ Return ONLY valid JSON, no markdown fences."""
             "status": "complete" if result["success"] else "complete_with_fallback",
             "model_used": result.get("model", "unknown"),
             "provider": result.get("provider", "unknown"),
+            "provider_status": result.get("provider_status", "unknown"),
+            "provider_attempts": result.get("provider_attempts", []),
+            "fallback_reason": result.get("fallback_reason"),
             "duration_ms": result.get("duration_ms", 0),
             "risk_level_received": risk_level,
             "device_checklist": checklist,

@@ -1,7 +1,7 @@
 flask==3.0.3
 flask-cors==4.0.1
 python-dotenv==1.0.1
-ibm-watsonx-ai==1.1.2
+ibm-watsonx-ai==1.9.1
 google-genai>=1.0.0
 mysql-connector-python==9.0.0
 SQLAlchemy==2.0.31

@@ -4,14 +4,18 @@ Active providers: IBM Granite (primary) + Google Gemini (secondary/fallback).
 Groq is disabled in this configuration.
 """
 import logging
+import time
 from typing import Dict, Any, Literal
 
 from services.granite_service import GraniteService
 from services.gemini_service import GeminiService
+from services.provider_errors import classify_provider_error
 
 logger = logging.getLogger(__name__)
 
 Provider = Literal["granite", "gemini", "groq", "auto"]
+PRIMARY_PROVIDER = "granite"
+FALLBACK_PROVIDER = "gemini"
 
 
 class AIModelManager:
@@ -20,7 +24,7 @@ class AIModelManager:
     IBM Granite is the primary model for all AI tasks.
     Google Gemini is the secondary fallback only.
     'auto' tries granite → gemini.
-    'groq' is remapped to gemini (Groq is disabled).
+    Legacy 'groq' requests use the Granite → Gemini route; Groq is disabled.
     """
 
     def __init__(self, config):
@@ -41,12 +45,16 @@ class AIModelManager:
         return {
             "granite": {
                 "available": self.granite.is_available,
+                "configured": self.granite.is_available,
+                "status": "configured" if self.granite.is_available else "not_configured",
                 "model": self.granite.model_id,
                 "provider": "IBM watsonx.ai",
                 "role": "primary",
             },
             "gemini": {
                 "available": self.gemini.is_available,
+                "configured": self.gemini.is_available,
+                "status": "configured" if self.gemini.is_available else "not_configured",
                 "model": self.gemini.model_id,
                 "provider": "Google Gemini",
                 "role": "secondary/fallback",
@@ -68,48 +76,113 @@ class AIModelManager:
         system_prompt: str = None,
     ) -> Dict[str, Any]:
         """
-        Call the specified provider.
-        - 'granite' → IBM Granite (primary)
-        - 'gemini'  → Google Gemini (secondary)
-        - 'groq'    → remapped to gemini (Groq disabled)
-        - 'auto'    → granite → gemini
+        Call Granite first and retry once with Gemini when requested.
+        The same prompt and generation options are sent to both providers.
         """
-        # Remap groq to gemini since Groq is disabled
+        started = time.monotonic()
         if provider == "groq":
-            provider = "gemini"
+            provider = "auto"
 
-        order = {
-            "granite": [self.granite],
-            "gemini":  [self.gemini],
-            "auto":    [self.granite, self.gemini],
-        }.get(provider, [self.granite])
-
-        last_error = None
-        for svc in order:
-            if not svc.is_available:
-                continue
-            result = svc.generate(
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
+        order = (
+            [(PRIMARY_PROVIDER, self.granite), (FALLBACK_PROVIDER, self.gemini)]
+            if provider in ("granite", "auto")
+            else [(FALLBACK_PROVIDER, self.gemini)]
+            if provider == "gemini"
+            else []
+        )
+        if not order:
+            return self._failed_result(
+                started, [], "invalid_provider"
             )
-            if result["success"]:
-                return result
-            last_error = result.get("error")
 
-        logger.error(f"All providers failed for provider={provider}: {last_error}")
+        attempts = []
+        for provider_name, svc in order:
+            if not svc.is_available:
+                attempts.append({
+                    "provider": provider_name,
+                    "status": "unavailable",
+                    "error": "not_configured",
+                })
+                continue
+
+            try:
+                result = svc.generate(
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except Exception as exc:
+                error_code = classify_provider_error(exc)
+                logger.warning("%s request failed (%s)", provider_name, error_code)
+                attempts.append({
+                    "provider": provider_name,
+                    "status": "failed",
+                    "error": error_code,
+                })
+                continue
+
+            if not isinstance(result, dict):
+                error_code = "invalid_response"
+            elif result.get("success") and isinstance(result.get("text"), str):
+                text = result["text"].strip()
+                if text:
+                    fallback_reason = next(
+                        (
+                            attempt["error"] for attempt in attempts
+                            if attempt["provider"] == PRIMARY_PROVIDER
+                        ),
+                        None,
+                    )
+                    return {
+                        **result,
+                        "success": True,
+                        "text": text,
+                        "model": result.get("model") or svc.model_id,
+                        "provider": provider_name,
+                        "provider_status": (
+                            "primary_success"
+                            if provider_name == PRIMARY_PROVIDER
+                            else "fallback_success"
+                        ),
+                        "provider_attempts": attempts + [{
+                            "provider": provider_name,
+                            "status": "success",
+                        }],
+                        "fallback_reason": fallback_reason,
+                        "error": None,
+                    }
+                error_code = "invalid_response"
+            else:
+                error_code = classify_provider_error(
+                    result.get("error") if isinstance(result, dict) else None
+                )
+
+            logger.warning("%s request failed (%s)", provider_name, error_code)
+            attempts.append({
+                "provider": provider_name,
+                "status": "failed",
+                "error": error_code,
+            })
+
+        return self._failed_result(started, attempts, "all_providers_failed")
+
+    @staticmethod
+    def _failed_result(started: float, attempts: list, error: str) -> Dict[str, Any]:
+        logger.error("AI provider attempts exhausted (%s)", error)
         return {
             "success": False,
-            "text": (
-                "AI services are currently unavailable. "
-                "Please verify your IBM and Gemini API credentials in .env and try again."
-            ),
+            "text": "",
             "model": "none",
             "provider": "none",
-            "duration_ms": 0,
+            "provider_status": "failed",
+            "provider_attempts": attempts,
+            "fallback_reason": (
+                attempts[0]["error"] if attempts else error
+            ),
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_tokens": 0,
             "completion_tokens": 0,
-            "error": last_error or "No AI provider available",
+            "error": error,
         }
 
     def test_all(self) -> Dict[str, Any]:

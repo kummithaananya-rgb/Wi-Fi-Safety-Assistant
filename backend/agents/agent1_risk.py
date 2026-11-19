@@ -7,7 +7,10 @@ Uses IBM Granite as primary model.
 import re
 import json
 import logging
+import math
 from typing import Dict, Any, List
+
+from security.guardrails import OutputValidator
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,16 @@ SUSPICIOUS_NAME_PATTERNS: List[str] = [
 SUSPICIOUS_PATTERNS_COMPILED = [
     re.compile(p, re.IGNORECASE) for p in SUSPICIOUS_NAME_PATTERNS
 ]
+ASSESSMENT_OUTPUT_FIELDS = frozenset({
+    "risk_level",
+    "risk_score",
+    "summary",
+    "warning_signs",
+    "risk_factors",
+    "positive_indicators",
+    "explanation",
+    "cert_in_reference",
+})
 
 RISKY_CONNECTION_TYPES = {"open", "unsecured", "none", "wep"}
 MEDIUM_RISK_TYPES = {"wpa", "wpa2-personal"}
@@ -61,7 +74,7 @@ class NetworkRiskAgent:
     """
 
     AGENT_NAME = "Agent 1: Network Risk Assessment"
-    PRIMARY_PROVIDER = "granite"
+    PRIMARY_PROVIDER = "auto"
 
     SYSTEM_PROMPT = """You are a cybersecurity expert specializing in public Wi-Fi security in India.
 Your role is to analyze Wi-Fi connection details provided by users and assess the risk level.
@@ -88,6 +101,7 @@ FORMAT your response as JSON with these exact keys:
 
     def __init__(self, ai_manager):
         self.ai = ai_manager
+        self.output_validator = OutputValidator()
         logger.info(f"{self.AGENT_NAME} initialized")
 
     def _pre_analyze(self, wifi_name: str, connection_type: str,
@@ -151,10 +165,7 @@ FORMAT your response as JSON with these exact keys:
         Main entry point.
         Returns structured assessment dict for Supervisor → Agent 2.
         """
-        logger.info(
-            f"[{self.AGENT_NAME}] Assessing: wifi='{wifi_name}' "
-            f"type='{connection_type}' location='{location}'"
-        )
+        logger.info(f"[{self.AGENT_NAME}] Assessing user-provided Wi-Fi details")
 
         pre = self._pre_analyze(wifi_name, connection_type, location, user_context)
 
@@ -189,6 +200,9 @@ Return ONLY valid JSON, no markdown fences."""
             "status": "complete" if result["success"] else "error",
             "model_used": result.get("model", "unknown"),
             "provider": result.get("provider", "unknown"),
+            "provider_status": result.get("provider_status", "unknown"),
+            "provider_attempts": result.get("provider_attempts", []),
+            "fallback_reason": result.get("fallback_reason"),
             "duration_ms": result.get("duration_ms", 0),
             "pre_analysis": pre,
             "input": {
@@ -200,9 +214,28 @@ Return ONLY valid JSON, no markdown fences."""
         }
 
         if result["success"]:
-            parsed = self._parse_llm_output(result["text"], pre)
-            agent_output.update(parsed)
-            agent_output["raw_response"] = result["text"]
+            validation = self.output_validator.validate(result.get("text", ""), pre["pre_risk"])
+            if validation["valid"]:
+                parsed = self._parse_llm_output(
+                    validation["sanitized_text"],
+                    pre,
+                    wifi_name,
+                    connection_type,
+                )
+                agent_output.update(parsed)
+                if parsed.get("output_validation_fallback"):
+                    agent_output["status"] = "complete_with_fallback"
+                else:
+                    agent_output["raw_response"] = validation["sanitized_text"]
+            else:
+                logger.warning(
+                    "Agent1: unsafe model output rejected; using rule-based assessment"
+                )
+                agent_output.update(
+                    self._fallback_assessment(pre, wifi_name, connection_type)
+                )
+                agent_output["status"] = "complete_with_fallback"
+                agent_output["output_validation_issues"] = validation["issues"]
         else:
             # Graceful fallback using rule-based result
             agent_output.update(self._fallback_assessment(pre, wifi_name, connection_type))
@@ -215,39 +248,88 @@ Return ONLY valid JSON, no markdown fences."""
         )
         return agent_output
 
-    def _parse_llm_output(self, text: str, pre: Dict) -> Dict[str, Any]:
-        """Parse JSON from LLM response; fallback to rule-based if malformed."""
+    def _parse_llm_output(
+        self,
+        text: str,
+        pre: Dict,
+        wifi_name: str,
+        connection_type: str,
+    ) -> Dict[str, Any]:
+        """Parse model JSON, enforcing output shape and the deterministic risk floor."""
         # Strip markdown code fences if present
         clean = re.sub(r"```(?:json)?", "", text).strip().strip("`").strip()
         try:
             data = json.loads(clean)
-            # Normalize risk_level
-            risk = str(data.get("risk_level", pre["pre_risk"])).upper()
-            if risk not in ("LOW", "MEDIUM", "HIGH"):
-                risk = pre["pre_risk"]
-            data["risk_level"] = risk
-            return data
         except (json.JSONDecodeError, ValueError):
-            logger.warning("Agent1: LLM JSON parse failed, extracting partial data")
-            return self._extract_partial(text, pre)
+            data = None
 
-    def _extract_partial(self, text: str, pre: Dict) -> Dict[str, Any]:
-        """Heuristic extraction if JSON is malformed."""
-        risk = pre["pre_risk"]
-        for level in ("HIGH", "MEDIUM", "LOW"):
-            if level in text.upper():
-                risk = level
-                break
-        return {
-            "risk_level": risk,
-            "risk_score": {"HIGH": 85, "MEDIUM": 50, "LOW": 20}[risk],
-            "summary": f"Risk assessment: {risk}",
-            "warning_signs": pre["flags"],
-            "risk_factors": pre["flags"],
-            "positive_indicators": [],
-            "explanation": text[:400] if text else "Assessment completed.",
-            "cert_in_reference": "Refer to https://www.cert-in.org.in/ for advisories",
-        }
+        list_fields = ("warning_signs", "risk_factors", "positive_indicators")
+        if isinstance(data, dict):
+            unexpected_fields = data.keys() - ASSESSMENT_OUTPUT_FIELDS
+            if unexpected_fields:
+                logger.warning("Agent1: unexpected model fields ignored")
+            data = {
+                field: data[field]
+                for field in ASSESSMENT_OUTPUT_FIELDS
+                if field in data
+            }
+
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("risk_level"), str)
+            or not isinstance(data.get("risk_score"), (int, float))
+            or isinstance(data.get("risk_score"), bool)
+            or (
+                isinstance(data.get("risk_score"), float)
+                and not math.isfinite(data["risk_score"])
+            )
+            or not all(isinstance(data.get(key), str) for key in ("summary", "explanation"))
+            or not all(
+                isinstance(data.get(key), list)
+                and all(isinstance(item, str) for item in data[key])
+                for key in list_fields
+            )
+            or not isinstance(data.get("cert_in_reference"), str)
+        ):
+            logger.warning("Agent1: invalid model response; using rule-based assessment")
+            fallback = self._fallback_assessment(pre, wifi_name, connection_type)
+            fallback["output_validation_fallback"] = True
+            return fallback
+
+        risk = data["risk_level"].strip().upper()
+        if risk not in ("LOW", "MEDIUM", "HIGH"):
+            logger.warning("Agent1: invalid model risk level; using rule-based assessment")
+            fallback = self._fallback_assessment(pre, wifi_name, connection_type)
+            fallback["output_validation_fallback"] = True
+            return fallback
+
+        risk_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+        minimum_risk = pre["pre_risk"]
+        if risk_rank[risk] < risk_rank[minimum_risk]:
+            risk = minimum_risk
+            fallback = self._fallback_assessment(pre, wifi_name, connection_type)
+            data["summary"] = fallback["summary"]
+            data["explanation"] = fallback["explanation"]
+
+        if minimum_risk == "HIGH":
+            fallback = self._fallback_assessment(pre, wifi_name, connection_type)
+            data["summary"] = fallback["summary"]
+            data["explanation"] = fallback["explanation"]
+
+        data["warning_signs"] = list(dict.fromkeys(
+            data["warning_signs"] + pre["flags"]
+        ))
+        data["risk_factors"] = list(dict.fromkeys(
+            data["risk_factors"] + pre["flags"]
+        ))
+
+        score_floor = {"LOW": 0, "MEDIUM": 50, "HIGH": 80}[risk]
+        data["risk_level"] = risk
+        data["risk_score"] = min(
+            100,
+            max(score_floor, int(data["risk_score"])),
+        )
+        return data
 
     def _fallback_assessment(self, pre: Dict, wifi_name: str,
                              connection_type: str) -> Dict[str, Any]:
@@ -256,9 +338,9 @@ Return ONLY valid JSON, no markdown fences."""
         score = {"HIGH": 80, "MEDIUM": 55, "LOW": 20}[risk]
         explanations = {
             "HIGH": (
-                f"The Wi-Fi network '{wifi_name}' shows multiple high-risk indicators "
-                "including insecure connection type or suspicious patterns. "
-                "Avoid sensitive activities on this network."
+                "The supplied connection details include high-risk indicators. "
+                "Avoid sensitive activities on this network and consider switching "
+                "to mobile data."
             ),
             "MEDIUM": (
                 f"The Wi-Fi network '{wifi_name}' has some concerning characteristics. "
